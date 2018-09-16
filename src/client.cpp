@@ -5,6 +5,14 @@
 #include <openssl/sha.h>
 #include <vector>
 
+// Client side C/C++ program to demonstrate Socket programming 
+#include <sys/socket.h> 
+#include <cstdlib> 
+#include <netinet/in.h> 
+#include <arpa/inet.h>
+#include <string.h> 
+#define PORT 4500 
+
 using namespace std;
 
 #define PIECE_SIZE     (512 * 1024)
@@ -87,60 +95,93 @@ int command_size_check(vector<string> &v, unsigned int min_size, unsigned int ma
     return SUCCESS;
 }
 
+int send_data_to_tracker(string str)
+{
+    struct sockaddr_in address; 
+    int sock = 0, valread; 
+    struct sockaddr_in serv_addr; 
+    //char *hello = "Hello from client"; 
+    char buffer[1024] = {0}; 
+    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) 
+    { 
+        status_print("Socket connection error!!");
+        return FAILURE; 
+    } 
+
+    memset(&serv_addr, '0', sizeof(serv_addr)); 
+
+    serv_addr.sin_family = AF_INET; 
+    serv_addr.sin_port = htons(PORT); 
+
+    // Convert IPv4 and IPv6 addresses from text to binary form 
+    if(inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr)<=0)  
+    { 
+        status_print("Invalid address/ Address not supported");
+        return FAILURE;
+    } 
+
+    if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) 
+    { 
+        status_print("Connection with tracker failed!!");
+        return FAILURE; 
+    } 
+    send(sock , str.c_str() , str.length() , 0 ); 
+    close(sock);
+    return SUCCESS;
+}
+
 int share_command(vector<string> &cmd)
 {
+    string str;
     string local_file_path, mtorrent_file_path;
     local_file_path = abs_path_get(cmd[1]);
     mtorrent_file_path = abs_path_get(cmd[2]);
 
     unsigned char obuf[21] = {'\0'};
     char sha1_buff[3] = {'\0'};
-    int total_bytes, bytes_read = 0;
+    int bytes_read, total_bytes_read = 0;
     bool read_done = false;
     string sha1_str;
 
     ifstream infile (local_file_path.c_str(), ios::binary | ios::in);
-    infile.seekg(0, ios::end);
-    total_bytes = infile.tellg();
 
-    int read_size;
-    while(!read_done)
+    while(infile)
     {
-        infile.seekg(bytes_read, infile.beg);
-        if(total_bytes - bytes_read > PIECE_SIZE)
-            read_size = PIECE_SIZE;
-        else
-        {
-            read_size = total_bytes - bytes_read;
-            read_done = true;
-        }
-
         unsigned char ibuf[PIECE_SIZE + 1] = {'\0'};
-        infile.read((char*)ibuf, read_size);
-        SHA1(ibuf, strlen((const char*)ibuf), obuf);
+        infile.read((char*)ibuf, PIECE_SIZE);
 
-        string str;
-        for (int i = 0; i < 20; i++) {
+        bytes_read = infile.gcount();
+        SHA1(ibuf, bytes_read, obuf);
+        total_bytes_read += bytes_read;
+
+        str = "";
+        for (int i = 0; i < 10; i++) {
             snprintf(sha1_buff, sizeof(sha1_buff), "%02x", obuf[i]);
-            str = str + sha1_buff;					// str becomes a string of 40 characters
+            str = str + sha1_buff;			// str becomes a string of 40 characters
         }
-        sha1_str = sha1_str + str.substr(0, 20);			// taking the first 20 characters
-        bytes_read += read_size;
+        sha1_str = sha1_str + str;			// taking the first 20 characters
     }
 
     ofstream out(mtorrent_file_path, ios::out);
     int pos = local_file_path.find_last_of("/");
+    string local_file_name = local_file_path.substr(pos+1);
     if(out)
     {
         out << tracker1_addr << "\n";
         out << tracker2_addr << "\n";
-        out << local_file_path.substr(pos+1) << "\n";
-        out << total_bytes << "\n";
+        out << local_file_name << "\n";
+        out << total_bytes_read << "\n";
         out << sha1_str << "\n";
     }
-    //cout << sha1_str.length() << endl;
-    //cout << sha1_str << endl;
-    //cout << "Total bytes read = " << bytes_read << endl;
+
+    SHA1((const unsigned char*)sha1_str.c_str(), sha1_str.length(), obuf);
+    str = client_addr + "$" + local_file_name + "$";
+    for (int i = 0; i < 10; i++) {
+        snprintf(sha1_buff, sizeof(sha1_buff), "%02x", obuf[i]);
+        str = str + sha1_buff;					// str becomes a string of 40 characters
+    }
+    
+    send_data_to_tracker(str);
     return 0;
 }
 
@@ -300,7 +341,7 @@ int main(int argc, char* argv[])
     log_file_path = argv[4];
 
     enter_command();
-    cin.get();
+    screen_clear();
 
     tcsetattr( STDIN_FILENO, TCSANOW, &prev_attr);
     return 0;
