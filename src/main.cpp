@@ -7,7 +7,7 @@
 
 using namespace std;
 
-#define PIECE_SIZE    (512 * 1024)
+#define PIECE_SIZE     (512 * 1024)
 #define pb             push_back
 
 #define FAILURE        -1
@@ -24,7 +24,6 @@ static int cursor_r_pos;
 static int cursor_c_pos;
 static int cursor_left_limit;
 static int cursor_right_limit;
-string root_dir;
 string working_dir;
 struct termios prev_attr, new_attr;
 
@@ -46,14 +45,6 @@ void screen_clear()
     cursor_r_pos = cursor_c_pos = 1;
     cursor_init();
 }
-
-#if 0
-void from_cursor_line_clear()
-{
-    cout << "\e[0K";
-    cout.flush();
-}
-#endif
 
 void print_mode()
 {
@@ -108,11 +99,9 @@ int share_command(vector<string> &cmd)
     bool read_done = false;
     string sha1_str;
 
-    //streampos pos;
     ifstream infile (local_file_path.c_str(), ios::binary | ios::in);
     infile.seekg(0, ios::end);
     total_bytes = infile.tellg();
-    //total_bytes = pos;
 
     int read_size;
     while(!read_done)
@@ -139,9 +128,19 @@ int share_command(vector<string> &cmd)
         bytes_read += read_size;
     }
 
-    cout << sha1_str.length() << endl;
-    cout << sha1_str << endl;
-    cout << "Total bytes read = " << bytes_read << endl;
+    ofstream out(mtorrent_file_path, ios::out);
+    int pos = local_file_path.find_last_of("/");
+    if(out)
+    {
+        out << tracker1_addr << "\n";
+        out << tracker2_addr << "\n";
+        out << local_file_path.substr(pos+1) << "\n";
+        out << total_bytes << "\n";
+        out << sha1_str << "\n";
+    }
+    //cout << sha1_str.length() << endl;
+    //cout << sha1_str << endl;
+    //cout << "Total bytes read = " << bytes_read << endl;
     return 0;
 }
 
@@ -263,217 +262,6 @@ void enter_command()
                 continue;
             share_command(command);
         }
-        #if 0
-        else if(command[0] == "move")
-        {
-            if(FAILURE == command_size_check(command, 3, INT_MAX, "move: (usage):- \"move <source_file/dir(s)>"
-                                                                  " <destination_directory>\""))
-                continue;
-            move_command(command);
-        }
-        else if(command[0] == "rename")
-        {
-            if(FAILURE == command_size_check(command, 3, 3, "rename: (usage):- \"rename <source_file/dir>"
-                                                             " <destination_file/dir>\""))
-                continue;
-            
-            string old_path = abs_path_get(command[1]);
-            string new_path = abs_path_get(command[2]);
-            if(is_directory(old_path))
-            {
-                if(!dir_exists(old_path))
-                {
-                    status_print(command[1] + " doesn't exist!!");
-                    continue;
-                }
-                if(dir_exists(new_path))
-                {
-                    status_print(command[2] + " already exists!!");
-                    continue;
-                }
-            }
-            else
-            {
-                if(!file_exists(old_path))
-                {
-                    status_print(command[1] + " doesn't exist!!");
-                    continue;
-                }
-                if(file_exists(new_path))
-                {
-                    status_print(command[2] + " already exists!!");
-                    continue;
-                }
-            }
-            if(FAILURE == rename(old_path.c_str(), new_path.c_str()))
-            {
-                status_print("rename failed!! errno: " + to_string(errno));
-            }
-            else
-            {
-                display_refresh();
-            }
-        }
-        else if(command[0] == "create_file")
-        {
-            if(FAILURE == command_size_check(command, 3, 3, "create_file: (usage):- \"create_file <new_file>"
-                                                             " <destination_dir>\""))
-                continue;
-
-            string dest_path = abs_path_get(command[2]);
-            if(dest_path[dest_path.length() - 1] != '/')
-                dest_path = dest_path + "/";
-
-            if(!dir_exists(dest_path))
-            {
-                status_print(command[2] + " doesn't exists!!");
-                continue;
-            }
-            dest_path += command[1];
-            if(file_exists(dest_path))
-            {
-                status_print(command[1] + " already exists at " + command[2]);
-                continue;
-            }
-
-            int fd = open(dest_path.c_str(), O_RDWR | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH);
-            if(FAILURE == fd)
-            {
-                status_print( "open failed!! errno: " + to_string(errno));
-            }
-            else
-            {
-                close(fd);
-                display_refresh();
-            }
-        }
-        else if(command[0] == "create_dir")
-        {
-            if(FAILURE == command_size_check(command, 3, 3, "create_dir: (usage):- \"create_dir <new_dir>"
-                                                             " <destination_dir>\""))
-                continue;
-
-            string dest_path = abs_path_get(command[2]);
-            if(dest_path[dest_path.length() - 1] != '/')
-                dest_path = dest_path + "/";
-
-            if(!dir_exists(dest_path))
-            {
-                status_print(command[2] + " doesn't exists!!");
-                continue;
-            }
-            dest_path += command[1];
-            if(dir_exists(dest_path))
-            {
-                status_print(command[1] + " already exists at " + command[2]);
-                continue;
-            }
-            if(FAILURE == mkdir(dest_path.c_str(), S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH))
-            {
-                status_print("mkdir failed!! errno: " + to_string(errno));
-            }
-            else
-            {
-                display_refresh();
-            }
-        }
-        else if(command[0] == "delete_file")
-        {
-            if(FAILURE == command_size_check(command, 2, 2, "delete_file: (usage):- \"delete_file <file_path>\""))
-                continue;
-
-            string rem_path = abs_path_get(command[1]);
-            if(!file_exists(rem_path))
-            {
-                status_print(command[1] + " doesn't exists!!");
-                continue;
-            }
-            
-            if(FAILURE == unlinkat(0, rem_path.c_str(), 0))
-            {
-                status_print("unlinkat failed!! errno: " + to_string(errno));
-            }
-            else
-            {
-               display_refresh();
-            }
-        }
-        else if(command[0] == "delete_dir")
-        {
-            if(FAILURE == command_size_check(command, 2, 2, "delete_dir: (usage):- \"delete_dir <directory_path>\""))
-                continue;
-
-            string rem_path = abs_path_get(command[1]);
-            if(!dir_exists(rem_path))
-            {
-                status_print(command[1] + " doesn't exist!!");
-                continue;
-            }
-            delete_command(rem_path);
-        }
-        else if(command[0] == "goto")
-        {
-            if(FAILURE == command_size_check(command, 2, 2, "goto: (usage):- \"goto <directory_path>\""))
-                continue;
-
-            string dest_path = abs_path_get(command[1]);
-            if(!dir_exists(dest_path))
-            {
-                status_print(command[1] + " doesn't exist!!");
-                continue;
-            }
-            if(dest_path[dest_path.length() - 1] != '/')
-                dest_path = dest_path + "/";
-
-            if(dest_path == working_dir)
-            {
-                status_print("Current directory and Destination directory are the same!!");
-                continue;
-            }
-            stack_clear(fwd_stack);
-            bwd_stack.push(working_dir);
-
-            working_dir = dest_path;
-            display_refresh();
-        }
-        else if(command[0] == "search")
-        {
-            if(FAILURE == command_size_check(command, 2, 2, "search: (usage):- \"search <directory/file_path>\""))
-                continue;
-
-            search_str = command[1];
-            content_list.clear();
-            nftw(working_dir.c_str(), search_cb, ftw_max_fd, 0);
-            if(content_list.empty())
-            {
-                status_print("No match found!!");
-                continue;
-            }
-            is_search_content = true;
-            stack_clear(fwd_stack);
-            break;
-        }
-        else if(command[0] == "snapshot")
-        {
-            if(FAILURE == command_size_check(command, 3, 3, "snapshot: (usage):- \"snapshot <folder> <dumpfile>\""))
-                continue;
-
-            snapshot_folder_path = abs_path_get(command[1]);
-            if(!dir_exists(snapshot_folder_path))
-            {
-                status_print(command[1] + " doesn't exist!!");
-                continue;
-            }
-            dumpfile_path = abs_path_get(command[2]);
-            ofstream dumpfile (dumpfile_path.c_str(), ios::out | ios::trunc);
-            dumpfile.close();
-            if(snapshot_folder_path[snapshot_folder_path.length() - 1] == '/')
-                snapshot_folder_path.erase(snapshot_folder_path.length() - 1);
-
-            nftw(snapshot_folder_path.c_str(), snapshot_cb, ftw_max_fd, 0);
-            display_refresh();
-        }
-        #endif
         else
         {
             status_print("Invalid Command. Please try again!!");
@@ -502,10 +290,9 @@ int main(int argc, char* argv[])
     }
 
     print_mode();
-    root_dir = getenv("PWD");
-    if(root_dir != "/")
-        root_dir = root_dir + "/";
-    working_dir = root_dir;
+    working_dir = getenv("PWD");
+    if(working_dir != "/")
+        working_dir = working_dir + "/";
 
     client_addr = argv[1];
     tracker1_addr = argv[2];
