@@ -33,12 +33,13 @@ static int cursor_c_pos;
 static int cursor_left_limit;
 static int cursor_right_limit;
 string working_dir;
-struct termios prev_attr, new_attr;
+//struct termios prev_attr, new_attr;
+static struct termios prev_attr, new_attr;
 
 static bool is_status_on;
 
-string client_addr, log_file_path;
-string tracker1_addr, tracker2_addr;
+static string client_addr, log_file_path;
+static string tracker1_addr, tracker2_addr;
 
 void cursor_init()
 {
@@ -144,11 +145,26 @@ int share_command(vector<string> &cmd)
     string sha1_str;
 
     ifstream infile (local_file_path.c_str(), ios::binary | ios::in);
+    if(!infile)
+    {
+        string err_str = "Error: ";
+        err_str = err_str + strerror(errno);
+        status_print(err_str);
+        return FAILURE;
+    }
 
     while(infile)
     {
         unsigned char ibuf[PIECE_SIZE + 1] = {'\0'};
         infile.read((char*)ibuf, PIECE_SIZE);
+
+        if(infile.fail() && !infile.eof())
+        {
+            string err_str = "Error: ";
+            err_str = err_str + strerror(errno);
+            status_print(err_str);
+            return FAILURE;
+        }
 
         bytes_read = infile.gcount();
         SHA1(ibuf, bytes_read, obuf);
@@ -175,11 +191,13 @@ int share_command(vector<string> &cmd)
     }
 
     SHA1((const unsigned char*)sha1_str.c_str(), sha1_str.length(), obuf);
-    str = client_addr + "$" + local_file_name + "$";
+    //str = "share$" + client_addr + "$" + local_file_name + "$";
+    str = "share$";
     for (int i = 0; i < 10; i++) {
         snprintf(sha1_buff, sizeof(sha1_buff), "%02x", obuf[i]);
         str = str + sha1_buff;					// str becomes a string of 40 characters
     }
+    str = str + "$" + client_addr + "$" + local_file_name;
     
     send_data_to_tracker(str);
     return 0;

@@ -6,6 +6,7 @@ using namespace std;
 #include <cstdio>
 #include <openssl/sha.h>
 #include <vector>
+#include <map>
 
 #include <stdio.h>  
 #include <string.h>       //strlen  
@@ -30,7 +31,95 @@ using namespace std;
 #define FAILURE        -1
 #define SUCCESS        0
 
-int main(int argc, char* argv[])
+static int cursor_r_pos;
+static int cursor_c_pos;
+
+static bool is_status_on;
+static string seeder_file_path, log_file_path;
+static string my_tracker_addr, other_tracker_addr;
+string working_dir;
+
+multimap<string, string> seeder_multimap;
+
+void status_print(string msg);
+
+void cursor_init()
+{
+    cout << "\033[" << cursor_r_pos << ";" << cursor_c_pos << "H";
+    cout.flush();
+}
+
+void screen_clear()
+{
+    cout << "\033[3J" << "\033[H\033[J";
+    cout.flush();
+    cursor_r_pos = cursor_c_pos = 1;
+    cursor_init();
+}
+
+string current_timestamp_get()
+{
+    time_t tt; 
+    struct tm *ti; 
+
+    time (&tt); 
+    ti = localtime(&tt);
+    return asctime(ti);
+}
+
+void print_log(string msg)
+{
+    ofstream out(log_file_path, ios_base::app);
+    if(!out)
+    {
+        string err_str = "Error: ";
+        err_str = err_str + strerror(errno);
+        status_print(err_str);
+        return;
+    }
+    string curr_timestamp = current_timestamp_get();
+    curr_timestamp.pop_back();
+    out << curr_timestamp << " : " << "\"" << msg << "\"" << "\n";
+}
+
+void client_request_handle(string req_str)
+{
+    int dollar_pos = req_str.find_first_of('$');
+    string cmd = req_str.substr(0, dollar_pos);
+    cout << "Command: " << cmd << endl;
+    req_str = req_str.substr(dollar_pos + 1);
+
+    if (cmd == "share")
+    {
+        dollar_pos = req_str.find_first_of('$');
+        string sha1_str = req_str.substr(0, dollar_pos);
+        req_str = req_str.substr(dollar_pos + 1);
+
+        string data_str = req_str;
+
+        dollar_pos = req_str.find_first_of('$');
+        string client_addr_str = req_str.substr(0, dollar_pos);
+        req_str = req_str.substr(dollar_pos + 1);
+
+        string file_name_str = req_str;
+
+        seeder_multimap.insert({sha1_str, data_str});
+
+        print_log(file_name_str + " shared by client " + client_addr_str); 
+    }
+}
+
+void status_print(string msg)
+{
+    if(is_status_on)
+        return;
+
+    is_status_on = true;
+    cout << "\033[1;31m" << msg << "\033[0m";   // RED color
+    cout.flush();
+}
+
+void tracker_run()
 {
     int opt = TRUE;   
     int tracker_socket , addrlen , new_socket , client_socket[MAX_CONNS],
@@ -40,7 +129,7 @@ int main(int argc, char* argv[])
 
     char buffer[1025];  //data buffer of 1K  
 
-    fd_set readfds;   
+    fd_set readfds;
 
     for (i = 0; i < max_clients; i++)   
     {   
@@ -183,12 +272,36 @@ int main(int argc, char* argv[])
                         cout << "SHA1 string read: " << buffer << endl;
                         getpeername(sd , (struct sockaddr*)&address, (socklen_t*)&addrlen);
                         printf("Client , ip %s , port %d \n", inet_ntoa(address.sin_addr), ntohs(address.sin_port));   
-                             
-                        //send(sd , buffer , strlen(buffer) , 0 );   
+
+                        client_request_handle(buffer);
+                        //send(sd , buffer , strlen(buffer) , 0 );
                     }
                 }
             }
         }
     }
+}
+
+int main(int argc, char* argv[])
+{
+    screen_clear();
+
+    if(argc != 5)
+    {
+        status_print("Tracker usage: \"./executable <my_tracker_ip>:<my_tracker_port>"
+                     " <other_tracker_ip>:<other_tracker_port> <seederlist_file> <log_file>\"\n");
+        return 0;
+    }
+
+    working_dir = getenv("PWD");
+    if(working_dir != "/")
+        working_dir = working_dir + "/";
+
+    my_tracker_addr = argv[1];
+    other_tracker_addr = argv[2];
+    seeder_file_path = abs_path_get(argv[3]);
+    log_file_path = abs_path_get(argv[4]);
+
+    tracker_run();
     return 0;
 }
