@@ -37,11 +37,20 @@ static int cursor_c_pos;
 static bool is_status_on;
 static string seeder_file_path, log_file_path;
 static string my_tracker_addr, other_tracker_addr;
+static string my_tracker_ip, other_tracker_ip;
+static int my_tracker_port, other_tracker_port;
 string working_dir;
 
 multimap<string, string> seeder_multimap;
 
-void status_print(string msg);
+enum client_request
+{
+    SHARE,
+    GET,
+    REMOVE_TORRENT
+};
+
+void status_print(int result, string msg);
 
 void cursor_init()
 {
@@ -67,14 +76,14 @@ string current_timestamp_get()
     return asctime(ti);
 }
 
-void print_log(string msg)
+void fprint_log(string msg)
 {
     ofstream out(log_file_path, ios_base::app);
     if(!out)
     {
         string err_str = "Error: ";
         err_str = err_str + strerror(errno);
-        status_print(err_str);
+        status_print(FAILURE, err_str);
         return;
     }
     string curr_timestamp = current_timestamp_get();
@@ -82,40 +91,81 @@ void print_log(string msg)
     out << curr_timestamp << " : " << "\"" << msg << "\"" << "\n";
 }
 
-void client_request_handle(string req_str)
+void fprint_seeder_info(string msg)
+{
+
+}
+
+void client_request_handle(int sock, string req_str)
 {
     int dollar_pos = req_str.find_first_of('$');
     string cmd = req_str.substr(0, dollar_pos);
     cout << "Command: " << cmd << endl;
     req_str = req_str.substr(dollar_pos + 1);
+    int req = stoi(cmd);
 
-    if (cmd == "share")
+    switch(req)
     {
-        dollar_pos = req_str.find_first_of('$');
-        string sha1_str = req_str.substr(0, dollar_pos);
-        req_str = req_str.substr(dollar_pos + 1);
+        case SHARE:
+        {
+            dollar_pos = req_str.find_first_of('$');
+            string sha1_str = req_str.substr(0, dollar_pos);
+            req_str = req_str.substr(dollar_pos + 1);
 
-        string data_str = req_str;
+            string data_str = req_str;
 
-        dollar_pos = req_str.find_first_of('$');
-        string client_addr_str = req_str.substr(0, dollar_pos);
-        req_str = req_str.substr(dollar_pos + 1);
+            dollar_pos = req_str.find_first_of('$');
+            string client_addr_str = req_str.substr(0, dollar_pos);
+            req_str = req_str.substr(dollar_pos + 1);
 
-        string file_name_str = req_str;
+            string file_name_str = req_str;
 
-        seeder_multimap.insert({sha1_str, data_str});
+            fprint_log("Inserting " + sha1_str + " -> " + client_addr_str); 
+            seeder_multimap.insert({sha1_str, client_addr_str});
 
-        print_log(file_name_str + " shared by client " + client_addr_str); 
+            fprint_log(file_name_str + " shared by client " + client_addr_str); 
+            fprint_seeder_info(sha1_str + "$" + client_addr_str);
+            break;
+        }
+
+        case GET:
+        {
+            auto lb = seeder_multimap.lower_bound(req_str);
+            auto ub = seeder_multimap.upper_bound(req_str);
+
+            string str;
+            for(auto itr = lb; itr != ub; ++itr)
+            {
+                str += itr->second;
+                ++itr;
+                if(itr != ub) str += "$";
+                --itr;
+            }
+            send(sock, str.c_str(), str.length(), 0);
+            fprint_log("Seeder List: " + str); 
+
+            break;
+        }
+
+        case REMOVE_TORRENT:
+            break;
+
+        default:
+            break;
     }
 }
 
-void status_print(string msg)
+void status_print(int result, string msg)
 {
     if(is_status_on)
         return;
 
     is_status_on = true;
-    cout << "\033[1;31m" << msg << "\033[0m";   // RED color
+    if(FAILURE == result)
+        cout << "\033[1;31m" << msg << "\033[0m";   // RED color
+    else
+        cout << "\033[1;32m" << msg << "\033[0m";   // GREEN color
+
     cout.flush();
 }
 
@@ -163,7 +213,7 @@ void tracker_run()
     }   
     printf("Listener on port %d \n", PORT);   
          
-    //try to specify maximum of 3 pending connections for the master socket  
+    //try to specify maximum of 100 pending connections for the master socket  
     if (listen(tracker_socket, MAX_CONNS) < 0)   
     {   
         perror("listen");   
@@ -273,12 +323,22 @@ void tracker_run()
                         getpeername(sd , (struct sockaddr*)&address, (socklen_t*)&addrlen);
                         printf("Client , ip %s , port %d \n", inet_ntoa(address.sin_addr), ntohs(address.sin_port));   
 
-                        client_request_handle(buffer);
+                        client_request_handle(sd, buffer);
                         //send(sd , buffer , strlen(buffer) , 0 );
                     }
                 }
             }
         }
+    }
+}
+
+void ip_and_port_split(string addr, string &ip, int &port)
+{
+    int colon_pos = addr.find(':');
+    if(colon_pos != string::npos)
+    {
+        ip = addr.substr(0, colon_pos);
+        port = stoi(addr.substr(colon_pos + 1));
     }
 }
 
@@ -288,7 +348,7 @@ int main(int argc, char* argv[])
 
     if(argc != 5)
     {
-        status_print("Tracker usage: \"./executable <my_tracker_ip>:<my_tracker_port>"
+        status_print(FAILURE, "Tracker usage: \"./executable <my_tracker_ip>:<my_tracker_port>"
                      " <other_tracker_ip>:<other_tracker_port> <seederlist_file> <log_file>\"\n");
         return 0;
     }
@@ -301,6 +361,9 @@ int main(int argc, char* argv[])
     other_tracker_addr = argv[2];
     seeder_file_path = abs_path_get(argv[3]);
     log_file_path = abs_path_get(argv[4]);
+
+    ip_and_port_split(my_tracker_addr, my_tracker_ip, my_tracker_port);
+    ip_and_port_split(other_tracker_addr, other_tracker_ip, other_tracker_port);
 
     tracker_run();
     return 0;
