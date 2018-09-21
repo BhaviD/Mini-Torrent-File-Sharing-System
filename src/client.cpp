@@ -8,6 +8,7 @@
 #include <thread>
 #include <mutex>
 #include <algorithm>
+#include <set>
 
 // Client side C/C++ program to demonstrate Socket programming 
 #include <sys/socket.h> 
@@ -15,6 +16,8 @@
 #include <netinet/in.h> 
 #include <arpa/inet.h>
 #include <string.h> 
+#include <signal.h>
+#include <pthread.h>
 
 using namespace std;
 
@@ -35,6 +38,7 @@ using namespace std;
 #define TRACKER2            1
 #define CLIENT              2
 #define MAX_DOWNLOADS       100
+#define MAX_CONNS           100
 
 static int cursor_r_pos;
 static int cursor_c_pos;
@@ -43,7 +47,8 @@ static int cursor_right_limit;
 string working_dir;
 static struct termios prev_attr, new_attr;
 
-multimap<string, string> seeding_files_multimap;
+map<string, string> seeding_file_paths;
+map<string, set<int>> seeding_file_chunks;
 
 static bool is_status_on;
 
@@ -226,20 +231,6 @@ int make_connection_with_tracker()
 
 int send_request(int sock, int req, string str)
 {
-    #if 0
-    int sock = make_connection(ip[curr_tracker_id], port[curr_tracker_id]);
-
-    if(FAILURE == sock)
-    {
-        curr_tracker_id = (curr_tracker_id == TRACKER1) ? TRACKER2 : TRACKER1;
-        sock = make_connection(ip[curr_tracker_id], port[curr_tracker_id]);
-        if(FAILURE == sock)
-        {
-            return FAILURE;
-        }
-    }
-    #endif
-
     string req_op = to_string(req);
     str = req_op + "$" + str;
     send(sock, str.c_str(), str.length(), 0); 
@@ -254,7 +245,8 @@ void update_seeding_file(operation opn, string sha1_str, string file_path)
     {
         case ADD:
         {
-            seeding_files_multimap.insert({sha1_str, file_path});
+            seeding_file_paths[sha1_str] = file_path;
+            //seeding_file_paths.insert({sha1_str, file_path});
 
             ofstream out(seeding_file_path + SEEDING_FILES_LIST, ios_base::app);
             out << sha1_str << "$" << file_path << "\n";
@@ -289,7 +281,7 @@ int share_request(vector<string> &cmd)
     local_file_path = abs_path_get(cmd[1]);
     mtorrent_file_path = abs_path_get(cmd[2]);
 
-    int bytes_read, total_bytes_read = 0;
+    int bytes_read, total_bytes_read = 0, nchunks = 0;
     bool read_done = false;
     string sha1_str;
 
@@ -317,6 +309,7 @@ int share_request(vector<string> &cmd)
 
         bytes_read = infile.gcount();
         total_bytes_read += bytes_read;
+        ++nchunks;
 
         sha1_str += get_sha1_str(ibuf, bytes_read);            // taking the first 20 characters
     }
@@ -339,11 +332,22 @@ int share_request(vector<string> &cmd)
 
     int sock = make_connection_with_tracker();
     if(FAILURE == sock)
-    {
         return FAILURE;
-    }
+
     send_request(sock, SHARE, double_sha1_str + "$" + addr[CLIENT] + "$" + local_file_name);
     close(sock);
+
+    auto itr = seeding_file_chunks.find(double_sha1_str);
+    if(itr == seeding_file_chunks.end())
+    {
+        seeding_file_chunks[double_sha1_str] = set<int>();
+        set<int> &id_set = seeding_file_chunks[double_sha1_str];
+        for(int i = 0; i < nchunks; ++i)
+        {
+            id_set.insert(i);
+        }
+    }
+
     status_print(SUCCESS, "SUCCESS: " + cmd[2]);
     return SUCCESS;
 }
@@ -378,7 +382,7 @@ void file_chunk_ids_get(string seeder_addr, string double_sha1_str, vector<vecto
     {
         id = stoi(chunk_ids.substr(0, dollar_pos));
         ids_vec.push_back(id);
-        chunk_ids.erase(0, dollar_pos);
+        chunk_ids.erase(0, dollar_pos+1);
     }
     id = stoi(chunk_ids);
     ids_vec.push_back(id);
@@ -387,7 +391,7 @@ void file_chunk_ids_get(string seeder_addr, string double_sha1_str, vector<vecto
     chunk_ids_vec.push_back(ids_vec);
 }
 
-void chunks_download(string reqd_ids_str, string seeder_addr, string dest_file_path, int download_id)
+void chunks_download(string double_sha1_str, string reqd_ids_str, string seeder_addr, string dest_file_path, int download_id)
 {
     string seeder_ip;
     int seeder_port, dollar_pos, id;
@@ -397,7 +401,7 @@ void chunks_download(string reqd_ids_str, string seeder_addr, string dest_file_p
     if(FAILURE == sock)
         return;
 
-    send_request(sock, GET_CHUNKS, reqd_ids_str);
+    send_request(sock, GET_CHUNKS, double_sha1_str + "$" + reqd_ids_str);
 
     ofstream out(dest_file_path);
     if(!out)
@@ -407,31 +411,39 @@ void chunks_download(string reqd_ids_str, string seeder_addr, string dest_file_p
         status_print(FAILURE, err_str);
         return;
     }
-    while((dollar_pos = reqd_ids_str.find('$')) != string::npos)
-    {
-        id = stoi(reqd_ids_str.substr(0, dollar_pos));
-        reqd_ids_str.erase(0, dollar_pos);
 
+    auto itr = seeding_file_chunks.find(double_sha1_str);
+    if(itr == seeding_file_chunks.end())
+    {
+        seeding_file_chunks[double_sha1_str] = set<int>();
+        itr = seeding_file_chunks.find(double_sha1_str);
+    }
+    set<int> &s = itr->second;
+
+    bool done = false;
+    int bytes_read;
+    while(!done)
+    {
+        if((dollar_pos = reqd_ids_str.find('$')) != string::npos)
+        {
+            id = stoi(reqd_ids_str);
+            done = true;
+        }
+        else
+        {
+            id = stoi(reqd_ids_str.substr(0, dollar_pos));
+            reqd_ids_str.erase(0, dollar_pos+1);
+        }
         char downloaded_chunk[PIECE_SIZE + 1] = {'\0'};
-        read(sock, downloaded_chunk, sizeof(downloaded_chunk) - 1);
+        bytes_read = read(sock, downloaded_chunk, sizeof(downloaded_chunk) - 1);
 
         {
             lock_guard<mutex> lg(download_mtx[download_id]);
             out.seekp(id * PIECE_SIZE, ios::beg);
-            out.write(downloaded_chunk, PIECE_SIZE);
+            out.write(downloaded_chunk, bytes_read);
         }
+        s.insert(id);
     }
-    id = stoi(reqd_ids_str);
-
-    char downloaded_chunk[PIECE_SIZE + 1] = {'\0'};
-    read(sock, downloaded_chunk, sizeof(downloaded_chunk) - 1);
-
-    {
-        lock_guard<mutex> lg(download_mtx[download_id]);
-        out.seekp(id * PIECE_SIZE, ios::beg);
-        out.write(downloaded_chunk, PIECE_SIZE);
-    }
-
     close(sock);
 }
 
@@ -455,7 +467,7 @@ void file_download(string double_sha1_str, string seeder_addrs, unsigned long lo
     {
         addr = seeder_addrs.substr(0, dollar_pos);
         seeder_addr_vec.push_back(addr);
-        seeder_addrs.erase(0, dollar_pos);
+        seeder_addrs.erase(0, dollar_pos+1);
 
         thread th(file_chunk_ids_get, addr, double_sha1_str, ref(seeder_chunk_ids), download_id);
         seeder_thread_vec.push_back(move(th));
@@ -511,7 +523,7 @@ void file_download(string double_sha1_str, string seeder_addrs, unsigned long lo
     {
         if(!distributed_ids[i].empty())
         {
-            thread th(chunks_download, distributed_ids[i], seeder_addr_vec[i], dest_file_path, download_id);
+            thread th(chunks_download, double_sha1_str, distributed_ids[i], seeder_addr_vec[i], dest_file_path, download_id);
             seeder_thread_vec.push_back(move(th));
         }
     }
@@ -568,6 +580,7 @@ int get_request(vector<string> &cmd)
     int download_id = download_id_get();
     mtx_inuse[download_id] = true;
     thread download_thread(file_download, double_sha1_str, seeder_list, filesize, dest_file_path, download_id);
+    download_thread.detach();
 }
 
 void enter_commands()
@@ -716,6 +729,268 @@ void ip_and_port_split(string addr, string &ip, int &port)
     }
 }
 
+void file_chunks_upload(int sock, string req_str)
+{
+    int dollar_pos = req_str.find('$');
+    string double_sha1_str = req_str.substr(0, dollar_pos);
+    req_str.erase(0, dollar_pos+1);
+
+    string local_file_path = seeding_file_paths[double_sha1_str];
+
+    ifstream in (local_file_path.c_str(), ios::binary | ios::in);
+    if(!in)
+    {
+        string err_str = "FAILURE: ";
+        err_str = err_str + strerror(errno);
+        status_print(FAILURE, err_str);
+        return;
+    }
+
+    bool done = false;
+    int id;
+    while(!done)
+    {
+        if((dollar_pos = req_str.find('$')) == string::npos)
+        {
+            id = stoi(req_str);
+            done = true;
+        }
+        else
+        {
+            id = stoi(req_str.substr(0, dollar_pos));
+            req_str.erase(0, dollar_pos+1);
+        }
+        in.seekg(id * PIECE_SIZE);
+
+        char ibuf[PIECE_SIZE + 1] = {'\0'};
+        in.read(ibuf, PIECE_SIZE);
+
+        if(in.fail() && !in.eof())
+        {
+            string err_str = "Error: ";
+            err_str = err_str + strerror(errno);
+            status_print(FAILURE, err_str);
+            return;
+        }
+        send(sock, ibuf, in.gcount(), 0);
+    }
+}
+
+void client_request_handle(int sock, string req_str)
+{
+    int dollar_pos = req_str.find('$');
+    string cmd = req_str.substr(0, dollar_pos);
+    cout << "Command: " << cmd << endl;
+    req_str = req_str.erase(0, dollar_pos+1);
+    int req = stoi(cmd);
+
+    switch(req)
+    {
+        case GET_CHUNK_IDS:
+        {
+            string double_sha1_str = req_str;
+            auto itr = seeding_file_chunks.find(double_sha1_str);
+            set<int>& id_set = itr->second;
+            auto set_itr = id_set.begin();
+            string ids_str;
+            ids_str += to_string(*set_itr);
+            for(++set_itr; set_itr != id_set.end(); ++set_itr)
+            {
+                ids_str += "$" + to_string(*set_itr);
+            }
+            send(sock, ids_str.c_str(), ids_str.length(), 0);
+
+            fprint_log("GET_CHUNK_IDS: Sending " + ids_str);
+            break;
+        }
+
+        case GET_CHUNKS:
+        {
+            thread th(file_chunks_upload, sock, req_str);
+
+            fprint_log("Seeder List: " + req_str); 
+
+            break;
+        }
+
+        default:
+            break;
+    }
+}
+
+void sigusr1_handler(int sig)
+{
+    ;
+}
+
+void seeder_run(bool& seeder_exit)
+{
+    int opt = true;
+    int seeder_socket , addrlen , new_socket , client_socket[MAX_CONNS],
+        max_clients = MAX_CONNS , activity, i , valread , sd;   
+    int max_sd;
+    struct sockaddr_in address;
+
+    signal(SIGUSR1, sigusr1_handler);
+
+    char buffer[1025];  //data buffer of 1K  
+
+    fd_set readfds;
+
+    for (i = 0; i < max_clients; i++)   
+    {   
+        client_socket[i] = 0;   
+    }
+
+    if( (seeder_socket = socket(AF_INET , SOCK_STREAM , 0)) == 0)   
+    {   
+        perror("socket failed");   
+        exit(EXIT_FAILURE);   
+    }   
+
+    //set master socket to allow multiple connections ,  
+    //this is just a good habit, it will work without this  
+    if( setsockopt(seeder_socket, SOL_SOCKET, SO_REUSEADDR, (char *)&opt, sizeof(opt)) < 0 )   
+    {   
+        perror("setsockopt");   
+        exit(EXIT_FAILURE);   
+    }   
+
+    //type of socket created  
+    address.sin_family = AF_INET;   
+    address.sin_addr.s_addr = INADDR_ANY;   
+    address.sin_port = htons( port[CLIENT] );   
+
+    //bind the socket to localhost port 4500
+    if (bind(seeder_socket, (struct sockaddr *)&address, sizeof(address))<0)   
+    {   
+        perror("bind failed");   
+        exit(EXIT_FAILURE);   
+    }   
+    //printf("Listener on port %d \n", port[CLIENT]);   
+         
+    //try to specify maximum of 100 pending connections for the master socket  
+    if (listen(seeder_socket, MAX_CONNS) < 0)   
+    {   
+        perror("listen");   
+        exit(EXIT_FAILURE);   
+    }   
+         
+    //accept the incoming connection  
+    addrlen = sizeof(address);
+    //printf ("Waiting for connections ...\n");
+
+    while(!seeder_exit)
+    {   
+        //clear the socket set  
+        FD_ZERO(&readfds);   
+
+        //add master socket to set  
+        FD_SET(seeder_socket, &readfds);   
+        max_sd = seeder_socket;   
+
+        //add child sockets to set  
+        for ( i = 0 ; i < max_clients ; i++)   
+        {   
+            //socket descriptor  
+            sd = client_socket[i];   
+
+            //if valid socket descriptor then add to read list  
+            if(sd > 0)   
+                FD_SET( sd , &readfds);   
+                 
+            //highest file descriptor number, need it for the select function  
+            if(sd > max_sd)   
+                max_sd = sd;   
+        }   
+     
+        // wait for an activity on one of the sockets , timeout is NULL ,  
+        // so wait indefinitely  
+        activity = select( max_sd + 1 , &readfds , NULL , NULL , NULL);   
+       
+        if (activity < 0)
+        {
+            if(errno != EINTR)
+            {
+                printf("select error");
+            }
+            continue;
+        }
+
+        // If something happened on the master socket ,  
+        // then its an incoming connection  
+        if (FD_ISSET(seeder_socket, &readfds))   
+        {   
+            if ((new_socket = accept(seeder_socket,  
+                    (struct sockaddr *)&address, (socklen_t*)&addrlen))<0)   
+            {   
+                perror("accept");   
+                exit(EXIT_FAILURE);   
+            }   
+             
+            //inform user of socket number - used in send and receive commands  
+            printf("New connection , socket fd is %d , ip is : %s , port : %d\n",
+                    new_socket , inet_ntoa(address.sin_addr) , ntohs (address.sin_port));   
+
+            #if 0
+            //send new connection greeting message  
+            if(send(new_socket, message, strlen(message), 0) != strlen(message))
+            {   
+                perror("send");   
+            }   
+            puts("Welcome message sent successfully");   
+            #endif
+            printf ("Client connected!!\n");   
+
+            //add new socket to array of sockets  
+            for (i = 0; i < max_clients; i++)   
+            {   
+                //if position is empty  
+                if( client_socket[i] == 0 )   
+                {   
+                    client_socket[i] = new_socket;   
+                    printf("Adding to list of sockets as %d\n" , i);   
+                         
+                    break;   
+                }   
+            }   
+        }   
+        else
+        {
+            //else its some IO operation on some other socket 
+            for (i = 0; i < max_clients; i++)   
+            {   
+                sd = client_socket[i];   
+                     
+                if (FD_ISSET( sd , &readfds))   
+                {   
+                    //Check if it was for closing , and also read the incoming message  
+                    if ((valread = read(sd, buffer, 1024)) == 0)   
+                    {   
+                        //Somebody disconnected , get his details and print  
+                        getpeername(sd , (struct sockaddr*)&address, (socklen_t*)&addrlen);
+                        printf("Host disconnected , ip %s , port %d \n" ,  
+                              inet_ntoa(address.sin_addr) , ntohs(address.sin_port));   
+                             
+                        close( sd );   
+                        client_socket[i] = 0;   
+                    }   
+                    else 
+                    {
+                        buffer[valread] = '\0';
+                        cout << "SHA1 string read: " << buffer << endl;
+                        getpeername(sd , (struct sockaddr*)&address, (socklen_t*)&addrlen);
+                        printf("Client , ip %s , port %d \n", inet_ntoa(address.sin_addr), ntohs(address.sin_port));   
+
+                        client_request_handle(sd, buffer);
+                        //send(sd , buffer , strlen(buffer) , 0 );
+                    }
+                }
+            }
+        }
+    }
+}
+
 int main(int argc, char* argv[])
 {
     screen_clear();
@@ -755,8 +1030,15 @@ int main(int argc, char* argv[])
 
     curr_tracker_id = TRACKER1;
 
+    bool seeder_exit = false;
+    thread t_seeder(seeder_run, ref(seeder_exit));
+
     enter_commands();
     screen_clear();
+
+    seeder_exit = true;
+    pthread_kill(t_seeder.native_handle(), SIGUSR1);
+    t_seeder.join();
 
     tcsetattr( STDIN_FILENO, TCSANOW, &prev_attr);
     return 0;

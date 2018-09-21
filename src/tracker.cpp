@@ -41,7 +41,7 @@ static string my_tracker_ip, other_tracker_ip;
 static int my_tracker_port, other_tracker_port;
 string working_dir;
 
-multimap<string, string> seeder_multimap;
+map<string, string> seeder_map;
 
 enum client_request
 {
@@ -109,7 +109,7 @@ void client_request_handle(int sock, string req_str)
         case SHARE:
         {
             dollar_pos = req_str.find_first_of('$');
-            string sha1_str = req_str.substr(0, dollar_pos);
+            string double_sha1_str = req_str.substr(0, dollar_pos);
             req_str = req_str.substr(dollar_pos + 1);
 
             string data_str = req_str;
@@ -120,20 +120,31 @@ void client_request_handle(int sock, string req_str)
 
             string file_name_str = req_str;
 
-            fprint_log("Inserting " + sha1_str + " -> " + client_addr_str); 
-            seeder_multimap.insert({sha1_str, client_addr_str});
+            //fprint_log("Inserting " + sha1_str + " -> " + client_addr_str); 
+            auto itr = seeder_map.find(double_sha1_str);
+            if (itr == seeder_map.end())
+            {
+                seeder_map[double_sha1_str] = client_addr_str;
+            }
+            else
+            {
+                seeder_map[double_sha1_str] += "$" + client_addr_str;
+            }
+            //seeder_map.insert({sha1_str, client_addr_str});
 
             fprint_log(file_name_str + " shared by client " + client_addr_str); 
-            fprint_seeder_info(sha1_str + "$" + client_addr_str);
+            fprint_seeder_info(double_sha1_str + "$" + client_addr_str);
             break;
         }
 
         case GET:
         {
-            auto lb = seeder_multimap.lower_bound(req_str);
-            auto ub = seeder_multimap.upper_bound(req_str);
+            
+            //auto lb = seeder_multimap.lower_bound(req_str);
+            //auto ub = seeder_multimap.upper_bound(req_str);
 
-            string str;
+            string seeder_addrs = seeder_map[req_str];
+            #if 0
             for(auto itr = lb; itr != ub; ++itr)
             {
                 str += itr->second;
@@ -141,9 +152,9 @@ void client_request_handle(int sock, string req_str)
                 if(itr != ub) str += "$";
                 --itr;
             }
-            send(sock, str.c_str(), str.length(), 0);
-            fprint_log("Seeder List: " + str); 
-
+            #endif
+            send(sock, seeder_addrs.c_str(), seeder_addrs.length(), 0);
+            fprint_log("Seeder List: " + seeder_addrs); 
             break;
         }
 
@@ -173,7 +184,7 @@ void tracker_run()
 {
     int opt = TRUE;   
     int tracker_socket , addrlen , new_socket , client_socket[MAX_CONNS],
-          max_clients = MAX_CONNS , activity, i , valread , sd;   
+        max_clients = MAX_CONNS , activity, i , valread , sd;   
     int max_sd;
     struct sockaddr_in address;   
 
@@ -203,7 +214,7 @@ void tracker_run()
     //type of socket created  
     address.sin_family = AF_INET;   
     address.sin_addr.s_addr = INADDR_ANY;   
-    address.sin_port = htons( PORT );   
+    address.sin_port = htons( my_tracker_port );   
          
     //bind the socket to localhost port 4500
     if (bind(tracker_socket, (struct sockaddr *)&address, sizeof(address))<0)   
@@ -211,7 +222,7 @@ void tracker_run()
         perror("bind failed");   
         exit(EXIT_FAILURE);   
     }   
-    printf("Listener on port %d \n", PORT);   
+    printf("Listener on port %d \n", my_tracker_port);   
          
     //try to specify maximum of 100 pending connections for the master socket  
     if (listen(tracker_socket, MAX_CONNS) < 0)   
@@ -291,8 +302,8 @@ void tracker_run()
                 {   
                     client_socket[i] = new_socket;   
                     printf("Adding to list of sockets as %d\n" , i);   
-                         
-                    break;   
+
+                    break;
                 }   
             }   
         }   
