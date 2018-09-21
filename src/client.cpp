@@ -5,6 +5,9 @@
 #include <openssl/sha.h>
 #include <vector>
 #include <map>
+#include <thread>
+#include <mutex>
+#include <algorithm>
 
 // Client side C/C++ program to demonstrate Socket programming 
 #include <sys/socket.h> 
@@ -31,6 +34,7 @@ using namespace std;
 #define TRACKER1            0
 #define TRACKER2            1
 #define CLIENT              2
+#define MAX_DOWNLOADS       100
 
 static int cursor_r_pos;
 static int cursor_c_pos;
@@ -44,13 +48,12 @@ multimap<string, string> seeding_files_multimap;
 static bool is_status_on;
 
 static string log_file_path, seeding_file_path, client_exec_path;
-//static string client_addr, tracker1_addr, tracker2_addr;
-//static string tracker1_ip, tracker2_ip, client_ip;
-//static int tracker1_port, tracker2_port, client_port;
 static string addr[3];
 static string ip[3];
 static int port[3];
 static int curr_tracker_id;
+static mutex download_mtx[MAX_DOWNLOADS];
+static bool mtx_inuse[MAX_DOWNLOADS];
 
 
 enum operation
@@ -59,12 +62,20 @@ enum operation
     REMOVE
 };
 
-enum client_request
+enum client_to_tracker_req
 {
     SHARE,
     GET,
     REMOVE_TORRENT
 };
+
+enum client_to_client_req
+{
+    GET_CHUNK_IDS,
+    GET_CHUNKS
+};
+
+void ip_and_port_split(string addr, string &ip, int &port);
 
 void cursor_init()
 {
@@ -141,6 +152,17 @@ void fprint_log(string msg)
 }
 
 
+int download_id_get()
+{
+    for(int i = 0; i < MAX_DOWNLOADS; ++i)
+    {
+        if(!mtx_inuse[i])
+            return i;
+    }
+    return FAILURE;
+}
+
+
 int command_size_check(vector<string> &v, unsigned int min_size, unsigned int max_size, string error_msg)
 {
     if(v.size() < min_size || v.size() > max_size)
@@ -183,8 +205,28 @@ int make_connection(string ip, uint16_t port)
     return sock;
 }
 
-int send_req_to_tracker(client_request req, string str)
+int make_connection_with_tracker()
 {
+    int sock = make_connection(ip[curr_tracker_id], port[curr_tracker_id]);
+
+    if(FAILURE == sock)
+    {
+        curr_tracker_id = (curr_tracker_id == TRACKER1) ? TRACKER2 : TRACKER1;
+        sock = make_connection(ip[curr_tracker_id], port[curr_tracker_id]);
+        if(FAILURE == sock)
+        {
+            string err_str = "Error: ";
+            err_str = err_str + strerror(errno);
+            status_print(FAILURE, err_str);
+            return FAILURE;
+        }
+    }
+    return sock;
+}
+
+int send_request(int sock, int req, string str)
+{
+    #if 0
     int sock = make_connection(ip[curr_tracker_id], port[curr_tracker_id]);
 
     if(FAILURE == sock)
@@ -196,24 +238,13 @@ int send_req_to_tracker(client_request req, string str)
             return FAILURE;
         }
     }
+    #endif
 
     string req_op = to_string(req);
     str = req_op + "$" + str;
     send(sock, str.c_str(), str.length(), 0); 
 
     fprint_log("Sent req to tracker: " + str);
-
-    if(GET == req)
-    {
-        char buff[4096] = {'\0'};
-        read(sock, buff, sizeof(buff) - 1);
-
-        string seeder_addrs(buff);
-        cout << seeder_addrs << endl;
-    }
-
-    close(sock);
-
     return SUCCESS;
 }
 
@@ -251,7 +282,7 @@ string get_sha1_str(const unsigned char* ibuf, int blen)
     return str;
 }
 
-int share_command(vector<string> &cmd)
+int share_request(vector<string> &cmd)
 {
     string str;
     string local_file_path, mtorrent_file_path;
@@ -305,13 +336,190 @@ int share_command(vector<string> &cmd)
     // applying SHA1 on already created SHA1 string.
     string double_sha1_str = get_sha1_str((const unsigned char*)sha1_str.c_str(), sha1_str.length());
     update_seeding_file(ADD, double_sha1_str, local_file_path);
-    send_req_to_tracker(SHARE, double_sha1_str + "$" + addr[CLIENT] + "$" + local_file_name);
 
+    int sock = make_connection_with_tracker();
+    if(FAILURE == sock)
+    {
+        return FAILURE;
+    }
+    send_request(sock, SHARE, double_sha1_str + "$" + addr[CLIENT] + "$" + local_file_name);
+    close(sock);
     status_print(SUCCESS, "SUCCESS: " + cmd[2]);
     return SUCCESS;
 }
 
-int get_command(vector<string> &cmd)
+void do_join(thread& t)
+{
+    t.join();
+}
+
+void join_all(vector<thread>& v)
+{
+    for_each(v.begin(), v.end(), do_join);
+}
+
+void file_chunk_ids_get(string seeder_addr, string double_sha1_str, vector<vector<int>>& chunk_ids_vec, int download_id)
+{
+    string seeder_ip;
+    int seeder_port;
+    ip_and_port_split(seeder_addr, seeder_ip, seeder_port);
+    int sock = make_connection(seeder_ip, seeder_port);
+
+    send_request(sock, GET_CHUNK_IDS, double_sha1_str);
+
+    char file_chunk_ids[4096] = {'\0'};
+    read(sock, file_chunk_ids, sizeof(file_chunk_ids) - 1);
+    close(sock);
+
+    string chunk_ids(file_chunk_ids);
+    int dollar_pos, id;
+    vector<int> ids_vec;
+    while((dollar_pos = chunk_ids.find('$')) != string::npos)
+    {
+        id = stoi(chunk_ids.substr(0, dollar_pos));
+        ids_vec.push_back(id);
+        chunk_ids.erase(0, dollar_pos);
+    }
+    id = stoi(chunk_ids);
+    ids_vec.push_back(id);
+
+    lock_guard<mutex> lg(download_mtx[download_id]);
+    chunk_ids_vec.push_back(ids_vec);
+}
+
+void chunks_download(string reqd_ids_str, string seeder_addr, string dest_file_path, int download_id)
+{
+    string seeder_ip;
+    int seeder_port, dollar_pos, id;
+    ip_and_port_split(seeder_addr, seeder_ip, seeder_port);
+
+    int sock = make_connection(seeder_ip, seeder_port);
+    if(FAILURE == sock)
+        return;
+
+    send_request(sock, GET_CHUNKS, reqd_ids_str);
+
+    ofstream out(dest_file_path);
+    if(!out)
+    {
+        string err_str = "Error: ";
+        err_str = err_str + strerror(errno);
+        status_print(FAILURE, err_str);
+        return;
+    }
+    while((dollar_pos = reqd_ids_str.find('$')) != string::npos)
+    {
+        id = stoi(reqd_ids_str.substr(0, dollar_pos));
+        reqd_ids_str.erase(0, dollar_pos);
+
+        char downloaded_chunk[PIECE_SIZE + 1] = {'\0'};
+        read(sock, downloaded_chunk, sizeof(downloaded_chunk) - 1);
+
+        {
+            lock_guard<mutex> lg(download_mtx[download_id]);
+            out.seekp(id * PIECE_SIZE, ios::beg);
+            out.write(downloaded_chunk, PIECE_SIZE);
+        }
+    }
+    id = stoi(reqd_ids_str);
+
+    char downloaded_chunk[PIECE_SIZE + 1] = {'\0'};
+    read(sock, downloaded_chunk, sizeof(downloaded_chunk) - 1);
+
+    {
+        lock_guard<mutex> lg(download_mtx[download_id]);
+        out.seekp(id * PIECE_SIZE, ios::beg);
+        out.write(downloaded_chunk, PIECE_SIZE);
+    }
+
+    close(sock);
+}
+
+void file_download(string double_sha1_str, string seeder_addrs, unsigned long long filesize, string dest_file_path, int download_id)
+{
+    int dollar_pos;
+    string addr;
+    vector<thread>      seeder_thread_vec;
+    vector<vector<int>> seeder_chunk_ids;
+    vector<string>      seeder_addr_vec;
+
+    int nchunks;
+    if(filesize % PIECE_SIZE)
+        nchunks = (filesize / PIECE_SIZE) + 1;
+    else
+        nchunks = filesize / PIECE_SIZE;
+
+    string ip;
+    int port;
+    while((dollar_pos = seeder_addrs.find('$')) != string::npos)
+    {
+        addr = seeder_addrs.substr(0, dollar_pos);
+        seeder_addr_vec.push_back(addr);
+        seeder_addrs.erase(0, dollar_pos);
+
+        thread th(file_chunk_ids_get, addr, double_sha1_str, ref(seeder_chunk_ids), download_id);
+        seeder_thread_vec.push_back(move(th));
+    }
+    thread th(file_chunk_ids_get, seeder_addrs, double_sha1_str, ref(seeder_chunk_ids), download_id);
+    seeder_thread_vec.push_back(move(th));
+    join_all(seeder_thread_vec);
+
+    int nseeders = seeder_chunk_ids.size();
+    int idx[nseeders] = {0};
+    bool alldone = false;
+
+    for(int i = 0; i < nseeders; ++i)
+    {
+        sort(seeder_chunk_ids[i].begin(), seeder_chunk_ids[i].end());
+    }
+    bool visited[nchunks] = {0};
+    vector<string> distributed_ids(nseeders);
+
+    while(!alldone)
+    {
+        alldone = true;
+        for(int i = 0; i < nseeders; ++i)
+        {
+            vector<int> &id_vec = seeder_chunk_ids[i];
+            int sz = id_vec.size();
+            while(idx[i] < sz && visited[id_vec[idx[i]]])
+                ++idx[i];
+
+            if(idx[i] < sz)
+            {
+                alldone = false;
+                visited[id_vec[idx[i]]] = true;
+                distributed_ids[i] += to_string(id_vec[idx[i]]);
+                ++idx[i];
+                if(idx[i] < sz)
+                    distributed_ids[i] += "$";
+            }
+        }
+    }
+
+    seeder_thread_vec.clear();
+
+    // block created to restrict the scope of "out" variable
+    {
+        // create an empty file of size "filesize"
+        ofstream out(dest_file_path);
+        out.seekp(filesize);
+        out << '\0';
+    }
+
+    for(int i = 0; i < nseeders; ++i)
+    {
+        if(!distributed_ids[i].empty())
+        {
+            thread th(chunks_download, distributed_ids[i], seeder_addr_vec[i], dest_file_path, download_id);
+            seeder_thread_vec.push_back(move(th));
+        }
+    }
+    join_all(seeder_thread_vec);
+    mtx_inuse[download_id] = false;
+}
+
+int get_request(vector<string> &cmd)
 {
     string mtorrent_file_path = abs_path_get(cmd[1]);
     string dest_file_path = abs_path_get(cmd[2]);
@@ -327,15 +535,39 @@ int get_command(vector<string> &cmd)
 
     int line_no = 0;
     string line_str;
-    while(line_no != 5 && getline(in, line_str))
+    while(line_no != 4 && getline(in, line_str))
+        ++line_no;
+
+    int nchunks = 0;
+    unsigned long long filesize = 0;
+    if(line_no == 4)    // filesize
     {
+        filesize = stoi(line_str);
+        if(filesize % PIECE_SIZE)
+            nchunks = (filesize / PIECE_SIZE) + 1;
+        else
+            nchunks = filesize / PIECE_SIZE;
+
+        getline(in, line_str);
         ++line_no;
     }
-    if(line_no == 5)
+
+    string double_sha1_str;
+    if(line_no == 5)    // sha1 string
     {
-        string double_sha1_str = get_sha1_str((const unsigned char*)line_str.c_str(), line_str.length());
-        send_req_to_tracker(GET, double_sha1_str);
+        double_sha1_str = get_sha1_str((const unsigned char*)line_str.c_str(), line_str.length());
     }
+
+    int sock = make_connection_with_tracker();
+    send_request(sock, GET, double_sha1_str);
+
+    char seeder_list[4096] = {'\0'};
+    read(sock, seeder_list, sizeof(seeder_list) - 1);
+    close(sock);
+
+    int download_id = download_id_get();
+    mtx_inuse[download_id] = true;
+    thread download_thread(file_download, double_sha1_str, seeder_list, filesize, dest_file_path, download_id);
 }
 
 void enter_commands()
@@ -457,14 +689,14 @@ void enter_commands()
             if(FAILURE == command_size_check(command, 3, 3, "share: (usage):- \"share <local_file_path>"
                                                             " <filename>.<file_extension>.mtorrent\""))
                 continue;
-            share_command(command);
+            share_request(command);
         }
         else if(command[0] == "get")
         {
             if(FAILURE == command_size_check(command, 3, 3, "get: (usage):- \"get <local_file_path>"
                                                             " <path_to_.mtorrent_file> <destination_path>\""))
                 continue;
-            get_command(command);
+            get_request(command);
         }
         else
         {
