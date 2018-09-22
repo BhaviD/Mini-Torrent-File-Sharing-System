@@ -9,6 +9,7 @@
 #include <mutex>
 #include <algorithm>
 #include <set>
+#include <sstream>
 
 // Client side C/C++ program to demonstrate Socket programming 
 #include <sys/socket.h> 
@@ -22,7 +23,6 @@
 using namespace std;
 
 #define PIECE_SIZE     (512 * 1024)
-#define TRANSFER_SIZE  (2 * 1024)
 #define pb             push_back
 
 #define FAILURE             -1
@@ -82,6 +82,7 @@ enum client_to_client_req
 };
 
 void ip_and_port_split(string addr, string &ip, int &port);
+void data_read(int sock, char* read_buffer, int size_to_read);
 
 void cursor_init()
 {
@@ -336,10 +337,10 @@ int share_request(vector<string> &cmd)
     close(sock);
 
     int filesize = total_bytes_read; 
-    if(filesize % TRANSFER_SIZE)
-        nchunks = (filesize / TRANSFER_SIZE) + 1;
+    if(filesize % PIECE_SIZE)
+        nchunks = (filesize / PIECE_SIZE) + 1;
     else
-        nchunks = filesize / TRANSFER_SIZE;
+        nchunks = filesize / PIECE_SIZE;
 
     auto itr = seeding_file_chunks.find(double_sha1_str);
     if(itr == seeding_file_chunks.end())
@@ -375,8 +376,15 @@ void file_chunk_ids_get(string seeder_addr, string double_sha1_str, vector<vecto
 
     send_request(sock, GET_CHUNK_IDS, double_sha1_str);
 
-    char file_chunk_ids[4096] = {'\0'};
-    read(sock, file_chunk_ids, sizeof(file_chunk_ids) - 1);
+    int read_size;
+    if(FAILURE == read(sock, &read_size, sizeof(read_size)))
+    {
+        status_print(FAILURE, "Read failed!!");
+        close(sock);
+        return;
+    }
+    char file_chunk_ids[read_size + 1] = {'\0'};
+    data_read(sock, file_chunk_ids, read_size);
     close(sock);
 
     string chunk_ids(file_chunk_ids);
@@ -395,7 +403,7 @@ void file_chunk_ids_get(string seeder_addr, string double_sha1_str, vector<vecto
     chunk_ids_vec.push_back(ids_vec);
 }
 
-void chunks_download(string double_sha1_str, string reqd_ids_str, string seeder_addr, string dest_file_path, int download_id)
+void chunks_download(string double_sha1_str, string reqd_ids_str, string seeder_addr, string dest_file_path, int download_id, ofstream& fout)
 {
     string seeder_ip;
     int seeder_port, dollar_pos, id;
@@ -407,6 +415,7 @@ void chunks_download(string double_sha1_str, string reqd_ids_str, string seeder_
 
     send_request(sock, GET_CHUNKS, double_sha1_str + "$" + reqd_ids_str);
 
+#if 0
     ofstream out(dest_file_path, ios::binary);
     if(!out)
     {
@@ -415,6 +424,7 @@ void chunks_download(string double_sha1_str, string reqd_ids_str, string seeder_
         status_print(FAILURE, err_str);
         return;
     }
+#endif
 
     auto itr = seeding_file_chunks.find(double_sha1_str);
     if(itr == seeding_file_chunks.end())
@@ -425,7 +435,7 @@ void chunks_download(string double_sha1_str, string reqd_ids_str, string seeder_
     set<int> &s = itr->second;
 
     bool done = false;
-    int bytes_read;
+    //int bytes_read;
     while(!done)
     {
         if((dollar_pos = reqd_ids_str.find('$')) == string::npos)
@@ -438,14 +448,32 @@ void chunks_download(string double_sha1_str, string reqd_ids_str, string seeder_
             id = stoi(reqd_ids_str.substr(0, dollar_pos));
             reqd_ids_str.erase(0, dollar_pos+1);
         }
-        char downloaded_chunk[TRANSFER_SIZE + 1] = {'\0'};
-        bytes_read = read(sock, downloaded_chunk, sizeof(downloaded_chunk) - 1);
+        //{
+            //lock_guard<mutex> lg(download_mtx[download_id]);
+            download_mtx[download_id].lock();
 
-        {
-            lock_guard<mutex> lg(download_mtx[download_id]);
-            out.seekp(id * TRANSFER_SIZE, ios::beg);
-            out.write(downloaded_chunk, bytes_read);
-        }
+            int read_size;
+            stringstream ss;
+            ss << this_thread::get_id();
+            //uint64_t id = stoull(ss.str());
+
+            if(FAILURE == read(sock, &read_size, sizeof(read_size)))
+            {
+                status_print(FAILURE, "Read failed!!");
+
+                fprint_log("Read failed!! thread id: " + ss.str());
+                close(sock);
+                return;
+            }
+            char downloaded_chunk[read_size + 1] = {'\0'};
+            data_read(sock, downloaded_chunk, read_size);
+
+            fprint_log("Bytes read: " + to_string(id) + " " + to_string(read_size) + " thread id: " + ss.str());
+
+            fout.seekp(id * PIECE_SIZE, ios::beg);
+            fout.write(downloaded_chunk, read_size);
+            download_mtx[download_id].unlock();
+        //}
         s.insert(id);
     }
     close(sock);
@@ -459,10 +487,10 @@ void file_download(string double_sha1_str, string seeder_addrs, unsigned long lo
     vector<string>      seeder_addr_vec;
 
     int nchunks;
-    if(filesize % TRANSFER_SIZE)
-        nchunks = (filesize / TRANSFER_SIZE) + 1;
+    if(filesize % PIECE_SIZE)
+        nchunks = (filesize / PIECE_SIZE) + 1;
     else
-        nchunks = filesize / TRANSFER_SIZE;
+        nchunks = filesize / PIECE_SIZE;
 
     ndollars = count(seeder_addrs.begin(), seeder_addrs.end(), '$');
     int nseeders = ndollars + 1;
@@ -524,18 +552,23 @@ void file_download(string double_sha1_str, string seeder_addrs, unsigned long lo
     }
 
     // block created to restrict the scope of "out" variable
+    // create an empty file of size "filesize"
+    ofstream fout(dest_file_path, ios::binary);
+    if(!fout)
     {
-        // create an empty file of size "filesize"
-        ofstream out(dest_file_path);
-        out.seekp(filesize - 1);
-        out << '\0';
+        string err_str = "Error: ";
+        err_str = err_str + strerror(errno);
+        status_print(FAILURE, err_str);
+        return;
     }
+    fout.seekp(filesize - 1);
+    fout << '\0';
 
     for(int i = 0; i < nseeders; ++i)
     {
         if(!distributed_ids[i].empty())
         {
-            seeder_thread_arr[i] = thread(chunks_download, double_sha1_str, distributed_ids[i], seeder_addr_vec[i], dest_file_path, download_id);
+            seeder_thread_arr[i] = thread(chunks_download, double_sha1_str, distributed_ids[i], seeder_addr_vec[i], dest_file_path, download_id, ref(fout));
         }
     }
 
@@ -543,6 +576,15 @@ void file_download(string double_sha1_str, string seeder_addrs, unsigned long lo
         seeder_thread_arr[j].join();
     
     mtx_inuse[download_id] = false;
+}
+
+void data_read(int sock, char* read_buffer, int size_to_read)
+{
+    int bytes_read = 0;
+    do
+    {
+        bytes_read += read(sock, read_buffer, size_to_read);   // read in a loop
+    }while(bytes_read < size_to_read);
 }
 
 int get_request(vector<string> &cmd)
@@ -582,13 +624,20 @@ int get_request(vector<string> &cmd)
     int sock = make_connection_with_tracker();
     send_request(sock, GET, double_sha1_str);
 
-    char seeder_list[4096] = {'\0'};
-    read(sock, seeder_list, sizeof(seeder_list) - 1);
+    int read_size;
+    if(FAILURE == read(sock, &read_size, sizeof(read_size)))
+    {
+        status_print(FAILURE, "Read failed!!");
+        close(sock);
+        return FAILURE;
+    }
+    char seeder_list[read_size + 1] = {'\0'};
+    data_read(sock, seeder_list, read_size);
     close(sock);
 
     int download_id = download_id_get();
     mtx_inuse[download_id] = true;
-    thread download_thread(file_download, double_sha1_str, seeder_list, filesize, dest_file_path, download_id);
+    thread download_thread(file_download, double_sha1_str, (string)seeder_list, filesize, dest_file_path, download_id);
     download_thread.detach();
 }
 
@@ -769,10 +818,10 @@ void file_chunks_upload(int sock, string req_str)
             id = stoi(req_str.substr(0, dollar_pos));
             req_str.erase(0, dollar_pos+1);
         }
-        in.seekg(id * TRANSFER_SIZE);
+        in.seekg(id * PIECE_SIZE);
 
-        char ibuf[TRANSFER_SIZE + 1] = {'\0'};
-        in.read(ibuf, TRANSFER_SIZE);
+        char ibuf[PIECE_SIZE + 1] = {'\0'};
+        in.read(ibuf, PIECE_SIZE);
 
         if(in.fail() && !in.eof())
         {
@@ -781,6 +830,8 @@ void file_chunks_upload(int sock, string req_str)
             status_print(FAILURE, err_str);
             return;
         }
+        int sz = in.gcount();
+        send(sock, &sz, sizeof(sz), 0);
         send(sock, ibuf, in.gcount(), 0);
     }
 }
@@ -807,6 +858,8 @@ void client_request_handle(int sock, string req_str)
             {
                 ids_str += "$" + to_string(*set_itr);
             }
+            int sz = ids_str.length();
+            send(sock, &sz, sizeof(sz), 0);
             send(sock, ids_str.c_str(), ids_str.length(), 0);
 
             fprint_log("GET_CHUNK_IDS: Sending " + ids_str);

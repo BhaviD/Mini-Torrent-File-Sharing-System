@@ -153,6 +153,8 @@ void client_request_handle(int sock, string req_str)
                 --itr;
             }
             #endif
+            int sz = seeder_addrs.length();
+            send(sock, &sz, sizeof(sz), 0);
             send(sock, seeder_addrs.c_str(), seeder_addrs.length(), 0);
             fprint_log("Seeder List: " + seeder_addrs); 
             break;
