@@ -74,7 +74,8 @@ enum client_to_tracker_req
 {
     SHARE,
     GET,
-    REMOVE_TORRENT
+    REMOVE_TORRENT,
+    REMOVE_ALL
 };
 
 enum client_to_client_req
@@ -265,16 +266,23 @@ void seeding_files_recreate()
     }
 }
 
-void update_seeding_file(operation opn, string double_sha1_str, string file_path = "", string mtorrent_file_path = "")
+void update_seeding_map_n_file(operation opn, string double_sha1_str, string file_path = "", string mtorrent_file_path = "")
 {
     switch(opn)
     {
         case ADD:
         {
-            seeding_files_map[double_sha1_str] = file_path + "$" + mtorrent_file_path;
-
             ofstream out(seeding_files_path, ios_base::app);
-            out << double_sha1_str << "$" << file_path << "$" << mtorrent_file_path << "\n";
+            if(mtorrent_file_path.empty())
+            {
+                seeding_files_map[double_sha1_str] = file_path;
+                out << double_sha1_str << "$" << file_path << "\n";
+            }
+            else
+            {
+                seeding_files_map[double_sha1_str] = file_path + "$" + mtorrent_file_path;
+                out << double_sha1_str << "$" << file_path << "$" << mtorrent_file_path << "\n";
+            }
             break;
         }
         case REMOVE:
@@ -353,15 +361,15 @@ int share_request(vector<string> &cmd)
         out << sha1_str << "\n";
     }
 
-    // applying SHA1 on already created SHA1 string.
-    string double_sha1_str = get_sha1_str((const unsigned char*)sha1_str.c_str(), sha1_str.length());
-    update_seeding_file(ADD, double_sha1_str, local_file_path, mtorrent_file_path);
-
     int sock = make_connection_with_tracker();
     if(FAILURE == sock)
         return FAILURE;
 
+    // applying SHA1 on already created SHA1 string.
+    string double_sha1_str = get_sha1_str((const unsigned char*)sha1_str.c_str(), sha1_str.length());
+
     send_request(sock, SHARE, double_sha1_str + "$" + addr[CLIENT]);
+    update_seeding_map_n_file(ADD, double_sha1_str, local_file_path, mtorrent_file_path);
     close(sock);
 
     int filesize = total_bytes_read; 
@@ -434,7 +442,8 @@ void file_chunk_ids_get(string seeder_addr, string double_sha1_str, vector<vecto
     chunk_ids_vec.push_back(ids_vec);
 }
 
-void chunks_download(string double_sha1_str, string reqd_ids_str, string seeder_addr, string dest_file_path, int download_id, ofstream& fout)
+void chunks_download(string double_sha1_str, string reqd_ids_str, string seeder_addr, string dest_file_path, 
+                     int download_id, ofstream& fout, string mtorrent_file_path)
 {
     string seeder_ip;
     int seeder_port, dollar_pos, id;
@@ -500,6 +509,7 @@ void chunks_download(string double_sha1_str, string reqd_ids_str, string seeder_
                     return;
                 }
                 send_request(tracker_sock, SHARE, double_sha1_str + "$" + addr[CLIENT]);
+                update_seeding_map_n_file(ADD, double_sha1_str, dest_file_path, mtorrent_file_path);
                 close(tracker_sock);
             }
             s.insert(id);
@@ -508,7 +518,7 @@ void chunks_download(string double_sha1_str, string reqd_ids_str, string seeder_
     close(sock);
 }
 
-void file_download(string double_sha1_str, string seeder_addrs, unsigned long long filesize, string dest_file_path, int download_id)
+void file_download(string double_sha1_str, string seeder_addrs, unsigned long long filesize, string dest_file_path, int download_id, string mtorrent_file_path)
 {
     int dollar_pos, ndollars;
     string addr;
@@ -593,7 +603,8 @@ void file_download(string double_sha1_str, string seeder_addrs, unsigned long lo
     {
         if(!distributed_ids[i].empty())
         {
-            seeder_thread_arr[i] = thread(chunks_download, double_sha1_str, distributed_ids[i], seeder_addr_vec[i], dest_file_path, download_id, ref(fout));
+            seeder_thread_arr[i] = thread(chunks_download, double_sha1_str, distributed_ids[i], seeder_addr_vec[i],
+                                          dest_file_path, download_id, ref(fout), mtorrent_file_path);
         }
     }
 
@@ -671,7 +682,7 @@ void get_request(vector<string> &cmd)
 
     int download_id = download_id_get();
     mtx_inuse[download_id] = true;
-    thread download_thread(file_download, double_sha1_str, (string)seeder_list, filesize, dest_file_path, download_id);
+    thread download_thread(file_download, double_sha1_str, (string)seeder_list, filesize, dest_file_path, download_id, mtorrent_file_path);
     download_thread.detach();
 }
 
@@ -713,7 +724,7 @@ void remove_request(vector<string> &cmd)
         return;
     }
 
-    update_seeding_file(REMOVE, double_sha1_str);
+    update_seeding_map_n_file(REMOVE, double_sha1_str);
 
     int sock = make_connection_with_tracker();
     send_request(sock, REMOVE_TORRENT, double_sha1_str + "$" + addr[CLIENT]);
@@ -754,6 +765,12 @@ void downloads_show()
             cout << "[D] " << itr->second << endl;
         }
     }
+}
+
+void seeding_files_removeall()
+{
+    int sock = make_connection_with_tracker();
+    send_request(sock, REMOVE_ALL, addr[CLIENT]);
 }
 
 void enter_commands()
@@ -899,6 +916,8 @@ void enter_commands()
             status_print(FAILURE, "Invalid Command. Please try again!!");
         }
     }
+
+    seeding_files_removeall();
 }
 
 
@@ -1011,6 +1030,48 @@ void sigusr1_handler(int sig)
     ;
 }
 
+void seeding_files_share()
+{
+    int pos = seeding_files_path.find_last_of('/');
+    string temp_file_path = seeding_files_path.substr(0, pos+1) + "temp_file.txt";
+    rename(seeding_files_path.c_str(), temp_file_path.c_str());
+
+    ifstream in(temp_file_path);
+    if(!in)
+    {
+        return;
+    }
+
+    string line_str, double_sha1_str, file_path, mtorrent_file_path;
+    vector<string> cmd;
+
+    int dollar_pos;
+    while(getline(in, line_str))
+    {
+        cmd.push_back("share");
+        dollar_pos = line_str.find('$');
+        double_sha1_str = line_str.substr(0, dollar_pos);
+        line_str.erase(0, dollar_pos + 1);
+
+        dollar_pos = line_str.find('$');
+        file_path = line_str.substr(0, dollar_pos);
+        line_str.erase(0, dollar_pos + 1);
+        mtorrent_file_path = line_str;
+
+        cmd.push_back(file_path);
+        cmd.push_back(mtorrent_file_path);
+
+        share_request(cmd);
+        cmd.clear();
+    }
+    if(FAILURE == unlinkat(0, temp_file_path.c_str(), 0))
+    {
+        stringstream ss;
+        ss << "Error: (" << __func__ << ") (" << __LINE__ << "): " << strerror(errno);
+        status_print(FAILURE, ss.str());
+    }
+}
+
 void seeder_run(bool& seeder_exit)
 {
     int opt = true;
@@ -1020,6 +1081,8 @@ void seeder_run(bool& seeder_exit)
     struct sockaddr_in address;
 
     signal(SIGUSR1, sigusr1_handler);
+
+    seeding_files_share();
 
     fd_set readfds;
 
