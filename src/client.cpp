@@ -235,6 +235,8 @@ int send_request(int sock, int req, string str)
 {
     string req_op = to_string(req);
     str = req_op + "$" + str;
+    int sz = str.length();
+    send(sock, &sz, sizeof(sz), 0);
     send(sock, str.c_str(), str.length(), 0); 
     return SUCCESS;
 }
@@ -380,6 +382,7 @@ void file_chunk_ids_get(string seeder_addr, string double_sha1_str, vector<vecto
     if(FAILURE == read(sock, &read_size, sizeof(read_size)))
     {
         status_print(FAILURE, "Read failed!!");
+        fprint_log("Read failed!! file_chunk_ids_get() ");
         close(sock);
         return;
     }
@@ -388,6 +391,8 @@ void file_chunk_ids_get(string seeder_addr, string double_sha1_str, vector<vecto
     close(sock);
 
     string chunk_ids(file_chunk_ids);
+    fprint_log(seeder_addr + " has these chunks: " + chunk_ids);
+
     int dollar_pos, id;
     vector<int> ids_vec;
     while((dollar_pos = chunk_ids.find('$')) != string::npos)
@@ -415,17 +420,6 @@ void chunks_download(string double_sha1_str, string reqd_ids_str, string seeder_
 
     send_request(sock, GET_CHUNKS, double_sha1_str + "$" + reqd_ids_str);
 
-#if 0
-    ofstream out(dest_file_path, ios::binary);
-    if(!out)
-    {
-        string err_str = "Error: ";
-        err_str = err_str + strerror(errno);
-        status_print(FAILURE, err_str);
-        return;
-    }
-#endif
-
     auto itr = seeding_file_chunks.find(double_sha1_str);
     if(itr == seeding_file_chunks.end())
     {
@@ -435,7 +429,6 @@ void chunks_download(string double_sha1_str, string reqd_ids_str, string seeder_
     set<int> &s = itr->second;
 
     bool done = false;
-    //int bytes_read;
     while(!done)
     {
         if((dollar_pos = reqd_ids_str.find('$')) == string::npos)
@@ -448,14 +441,12 @@ void chunks_download(string double_sha1_str, string reqd_ids_str, string seeder_
             id = stoi(reqd_ids_str.substr(0, dollar_pos));
             reqd_ids_str.erase(0, dollar_pos+1);
         }
-        //{
-            //lock_guard<mutex> lg(download_mtx[download_id]);
-            download_mtx[download_id].lock();
+        {
+            lock_guard<mutex> lg(download_mtx[download_id]);
 
             int read_size;
             stringstream ss;
             ss << this_thread::get_id();
-            //uint64_t id = stoull(ss.str());
 
             if(FAILURE == read(sock, &read_size, sizeof(read_size)))
             {
@@ -472,8 +463,7 @@ void chunks_download(string double_sha1_str, string reqd_ids_str, string seeder_
 
             fout.seekp(id * PIECE_SIZE, ios::beg);
             fout.write(downloaded_chunk, read_size);
-            download_mtx[download_id].unlock();
-        //}
+        }
         s.insert(id);
     }
     close(sock);
@@ -491,6 +481,8 @@ void file_download(string double_sha1_str, string seeder_addrs, unsigned long lo
         nchunks = (filesize / PIECE_SIZE) + 1;
     else
         nchunks = filesize / PIECE_SIZE;
+
+    fprint_log("There are total " + to_string(nchunks) + " chunks");
 
     ndollars = count(seeder_addrs.begin(), seeder_addrs.end(), '$');
     int nseeders = ndollars + 1;
@@ -513,18 +505,9 @@ void file_download(string double_sha1_str, string seeder_addrs, unsigned long lo
     for(int j = 0; j < nseeders; ++j)
         seeder_thread_arr[j].join();
 
-    //delete[] seeder_thread_arr;
-    //seeder_thread_arr = new thread[nseeders];
-
     int idx[nseeders] = {0};
     bool alldone = false;
 
-    #if 0
-    for(int i = 0; i < nseeders; ++i)
-    {
-        sort(seeder_chunk_ids[i].begin(), seeder_chunk_ids[i].end());
-    }
-    #endif
     bool visited[nchunks] = {0};
     vector<string> distributed_ids(nseeders);
 
@@ -628,6 +611,7 @@ int get_request(vector<string> &cmd)
     if(FAILURE == read(sock, &read_size, sizeof(read_size)))
     {
         status_print(FAILURE, "Read failed!!");
+        fprint_log("Read failed!! get_request() ");
         close(sock);
         return FAILURE;
     }
@@ -982,7 +966,7 @@ void seeder_run(bool& seeder_exit)
         // If something happened on the master socket ,  
         // then its an incoming connection  
         if (FD_ISSET(seeder_socket, &readfds))   
-        {   
+        {
             if ((new_socket = accept(seeder_socket,  
                     (struct sockaddr *)&address, (socklen_t*)&addrlen))<0)   
             {   
@@ -994,58 +978,97 @@ void seeder_run(bool& seeder_exit)
             printf("New connection , socket fd is %d , ip is : %s , port : %d\n",
                     new_socket , inet_ntoa(address.sin_addr) , ntohs (address.sin_port));   
 
-            #if 0
-            //send new connection greeting message  
-            if(send(new_socket, message, strlen(message), 0) != strlen(message))
-            {   
-                perror("send");   
-            }   
-            puts("Welcome message sent successfully");   
-            #endif
             printf ("Client connected!!\n");   
 
             //add new socket to array of sockets  
             for (i = 0; i < max_clients; i++)   
-            {   
-                //if position is empty  
-                if( client_socket[i] == 0 )   
-                {   
-                    client_socket[i] = new_socket;   
-                    printf("Adding to list of sockets as %d\n" , i);   
-                         
+            {
+                //if position is empty
+                if( client_socket[i] == 0 )
+                {
+                    client_socket[i] = new_socket;
+                    printf("Adding to list of sockets as %d\n" , i);
                     break;   
-                }   
-            }   
-        }   
+                }
+            }
+        }
         else
         {
+            #if 0
+            //else its some IO operation on some other socket 
+            for (i = 0; i < max_clients; i++)
+            {
+                sd = client_socket[i];
+
+                if (FD_ISSET( sd , &readfds))
+                {
+                    //Check if it was for closing , and also read the incoming message  
+                    if ((valread = read(sd, buffer, 1024)) == 0)
+                    {
+                        //Somebody disconnected , get his details and print  
+                        getpeername(sd , (struct sockaddr*)&address, (socklen_t*)&addrlen);
+                        printf("Host disconnected , ip %s , port %d \n" ,
+                                inet_ntoa(address.sin_addr) , ntohs(address.sin_port));
+
+                        close( sd );
+                        client_socket[i] = 0;
+                    }
+                    else
+                    {
+                        buffer[valread] = '\0';
+                        cout << "SHA1 string read: " << buffer << endl;
+                        getpeername(sd , (struct sockaddr*)&address, (socklen_t*)&addrlen);
+                        printf("Client , ip %s , port %d \n", inet_ntoa(address.sin_addr), ntohs(address.sin_port));
+
+                        client_request_handle(sd, buffer);
+                    }
+                }
+            }
+            #endif
+
             //else its some IO operation on some other socket 
             for (i = 0; i < max_clients; i++)   
             {   
                 sd = client_socket[i];   
                      
-                if (FD_ISSET( sd , &readfds))   
-                {   
-                    //Check if it was for closing , and also read the incoming message  
-                    if ((valread = read(sd, buffer, 1024)) == 0)   
-                    {   
-                        //Somebody disconnected , get his details and print  
-                        getpeername(sd , (struct sockaddr*)&address, (socklen_t*)&addrlen);
-                        printf("Host disconnected , ip %s , port %d \n" ,  
-                              inet_ntoa(address.sin_addr) , ntohs(address.sin_port));   
-                             
-                        close( sd );   
-                        client_socket[i] = 0;   
-                    }   
-                    else 
+                if (FD_ISSET( sd , &readfds))
+                {
+                    int read_size;
+                    valread = read(sd, &read_size, sizeof(read_size));
+                    if(FAILURE == valread)
                     {
-                        buffer[valread] = '\0';
-                        cout << "SHA1 string read: " << buffer << endl;
+                        status_print(FAILURE, "Read failed!!");
+                        fprint_log("Read failed!! seeder_run() ");
+                        close(sd);
+                        client_socket[i] = 0;   
+                    }
+                    else if(0 == valread)
+                    {
+                        // Somebody disconnected, get his details and print  
                         getpeername(sd , (struct sockaddr*)&address, (socklen_t*)&addrlen);
-                        printf("Client , ip %s , port %d \n", inet_ntoa(address.sin_addr), ntohs(address.sin_port));   
+                        //printf("Host disconnected , ip %s , port %d \n" ,  
+                             // inet_ntoa(address.sin_addr) , ntohs(address.sin_port));   
+                        stringstream ss;
+                        ss << "Host disconnected!! ip: " << inet_ntoa(address.sin_addr) << " port: " << ntohs(address.sin_port);
+                        fprint_log(ss.str());
+                             
+                        close(sd);
+                        client_socket[i] = 0;
+                    }
+                    else
+                    {
+                        char buffer[read_size + 1] = {'\0'};
+                        data_read(sd, buffer, read_size);
+
+                        //cout << "SHA1 string read: " << buffer << endl;
+                        stringstream ss;
+                        ss << "Request read: " << buffer;
+                        fprint_log(ss.str());
+
+                        getpeername(sd , (struct sockaddr*)&address, (socklen_t*)&addrlen);
+                        //printf("Client , ip %s , port %d \n", inet_ntoa(address.sin_addr), ntohs(address.sin_port));   
 
                         client_request_handle(sd, buffer);
-                        //send(sd , buffer , strlen(buffer) , 0 );
                     }
                 }
             }

@@ -182,6 +182,15 @@ void status_print(int result, string msg)
     cout.flush();
 }
 
+void data_read(int sock, char* read_buffer, int size_to_read)
+{
+    int bytes_read = 0;
+    do
+    {
+        bytes_read += read(sock, read_buffer, size_to_read);   // read in a loop
+    }while(bytes_read < size_to_read);
+}
+
 void tracker_run()
 {
     int opt = TRUE;   
@@ -190,7 +199,7 @@ void tracker_run()
     int max_sd;
     struct sockaddr_in address;   
 
-    char buffer[1025];  //data buffer of 1K  
+    //char buffer[1025];  //data buffer of 1K  
 
     fd_set readfds;
 
@@ -311,6 +320,7 @@ void tracker_run()
         }   
         else
         {
+            #if 0
             //else its some IO operation on some other socket 
             for (i = 0; i < max_clients; i++)   
             {   
@@ -338,6 +348,52 @@ void tracker_run()
 
                         client_request_handle(sd, buffer);
                         //send(sd , buffer , strlen(buffer) , 0 );
+                    }
+                }
+            }
+            #endif
+
+            for (i = 0; i < max_clients; i++)
+            {
+                sd = client_socket[i];
+
+                if (FD_ISSET( sd , &readfds))
+                {
+                    int read_size;
+                    valread = read(sd, &read_size, sizeof(read_size));
+                    if(FAILURE == valread)
+                    {
+                        status_print(FAILURE, "Read failed!!");
+                        fprint_log("Read failed!! seeder_run() ");
+                        close(sd);
+                        client_socket[i] = 0;
+                    }
+                    else if(0 == valread)
+                    {
+                        // Somebody disconnected, get his details and print  
+                        getpeername(sd , (struct sockaddr*)&address, (socklen_t*)&addrlen);
+                        //printf("Host disconnected , ip %s , port %d \n" ,  
+                        // inet_ntoa(address.sin_addr) , ntohs(address.sin_port));   
+                        stringstream ss;
+                        ss << "Host disconnected!! ip: " << inet_ntoa(address.sin_addr) << " port: " << ntohs(address.sin_port);
+                        fprint_log(ss.str());
+
+                        close(sd);
+                        client_socket[i] = 0;
+                    }
+                    else
+                    {
+                        char buffer[read_size + 1] = {'\0'};
+                        data_read(sd, buffer, read_size);
+
+                        //cout << "SHA1 string read: " << buffer << endl;
+                        stringstream ss;
+                        ss << "Request read: " << buffer;
+                        fprint_log(ss.str());
+                        getpeername(sd , (struct sockaddr*)&address, (socklen_t*)&addrlen);
+                        //printf("Client , ip %s , port %d \n", inet_ntoa(address.sin_addr), ntohs(address.sin_port));   
+
+                        client_request_handle(sd, buffer);
                     }
                 }
             }
