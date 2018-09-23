@@ -131,7 +131,6 @@ void client_request_handle(int sock, string req_str)
 {
     int dollar_pos = req_str.find('$');
     string cmd = req_str.substr(0, dollar_pos);
-    cout << "Command: " << cmd << endl;
     req_str = req_str.substr(dollar_pos + 1);
     int req = stoi(cmd);
 
@@ -245,8 +244,6 @@ void tracker_run()
     int max_sd;
     struct sockaddr_in address;   
 
-    //char buffer[1025];  //data buffer of 1K  
-
     fd_set readfds;
 
     for (i = 0; i < max_clients; i++)   
@@ -255,16 +252,20 @@ void tracker_run()
     }   
   
     if( (tracker_socket = socket(AF_INET , SOCK_STREAM , 0)) == 0)   
-    {   
-        perror("socket failed");   
-        exit(EXIT_FAILURE);   
+    {
+        stringstream ss;
+        ss << __func__ << " (" << __LINE__ << "): socket failed!!";
+        fprint_log(ss.str());
+        exit(EXIT_FAILURE);
     }   
 
     //set master socket to allow multiple connections ,  
     //this is just a good habit, it will work without this  
     if( setsockopt(tracker_socket, SOL_SOCKET, SO_REUSEADDR, (char *)&opt, sizeof(opt)) < 0 )   
-    {   
-        perror("setsockopt");   
+    {
+        stringstream ss;
+        ss << __func__ << " (" << __LINE__ << "): setsockopt";
+        fprint_log(ss.str());
         exit(EXIT_FAILURE);   
     }   
      
@@ -275,16 +276,20 @@ void tracker_run()
          
     //bind the socket to localhost port 4500
     if (bind(tracker_socket, (struct sockaddr *)&address, sizeof(address))<0)   
-    {   
-        perror("bind failed");   
+    {
+        stringstream ss;
+        ss << __func__ << " (" << __LINE__ << "): bind failed";
+        fprint_log(ss.str());
         exit(EXIT_FAILURE);   
     }   
-    printf("Listener on port %d \n", my_tracker_port);   
+    printf("Listening on port %d \n", my_tracker_port);   
          
     //try to specify maximum of 100 pending connections for the master socket  
     if (listen(tracker_socket, MAX_CONNS) < 0)   
-    {   
-        perror("listen");   
+    {
+        stringstream ss;
+        ss << __func__ << " (" << __LINE__ << "): listen failed";
+        fprint_log(ss.str());
         exit(EXIT_FAILURE);   
     }   
          
@@ -322,7 +327,6 @@ void tracker_run()
        
         if ((activity < 0) && (errno != EINTR))   
         {   
-            printf("select error");
             continue;
         }
 
@@ -333,23 +337,20 @@ void tracker_run()
             if ((new_socket = accept(tracker_socket,  
                     (struct sockaddr *)&address, (socklen_t*)&addrlen))<0)   
             {   
-                perror("accept");   
+                stringstream ss;
+                ss << __func__ << " (" << __LINE__ << "): accept() failed!!";
+                fprint_log(ss.str());
                 exit(EXIT_FAILURE);   
             }   
              
-            //inform user of socket number - used in send and receive commands  
-            printf("New connection , socket fd is %d , ip is : %s , port : %d\n",
-                    new_socket , inet_ntoa(address.sin_addr) , ntohs (address.sin_port));   
+            //inform user of socket number - used in send and receive commands
+            stringstream ss;
+            ss << __func__ << " (" << __LINE__ << "): New connection, socket fd is " << new_socket
+               << inet_ntoa(address.sin_addr), ntohs(address.sin_port);
+            fprint_log(ss.str());
 
-            #if 0
-            //send new connection greeting message  
-            if(send(new_socket, message, strlen(message), 0) != strlen(message))
-            {   
-                perror("send");   
-            }   
-            puts("Welcome message sent successfully");   
-            #endif
-            printf ("Client connected!!\n");   
+            //printf("New connection , socket fd is %d , ip is : %s , port : %d\n",
+                   // new_socket , inet_ntoa(address.sin_addr) , ntohs (address.sin_port));   
 
             //add new socket to array of sockets  
             for (i = 0; i < max_clients; i++)   
@@ -358,47 +359,12 @@ void tracker_run()
                 if( client_socket[i] == 0 )   
                 {   
                     client_socket[i] = new_socket;   
-                    printf("Adding to list of sockets as %d\n" , i);   
-
                     break;
                 }   
             }   
         }   
         else
         {
-            #if 0
-            //else its some IO operation on some other socket 
-            for (i = 0; i < max_clients; i++)   
-            {   
-                sd = client_socket[i];   
-                     
-                if (FD_ISSET( sd , &readfds))   
-                {   
-                    //Check if it was for closing , and also read the incoming message  
-                    if ((valread = read(sd, buffer, 1024)) == 0)   
-                    {   
-                        //Somebody disconnected , get his details and print  
-                        getpeername(sd , (struct sockaddr*)&address, (socklen_t*)&addrlen);
-                        printf("Host disconnected , ip %s , port %d \n" ,  
-                              inet_ntoa(address.sin_addr) , ntohs(address.sin_port));   
-                             
-                        close( sd );   
-                        client_socket[i] = 0;   
-                    }   
-                    else 
-                    {
-                        buffer[valread] = '\0';
-                        cout << "SHA1 string read: " << buffer << endl;
-                        getpeername(sd , (struct sockaddr*)&address, (socklen_t*)&addrlen);
-                        printf("Client , ip %s , port %d \n", inet_ntoa(address.sin_addr), ntohs(address.sin_port));   
-
-                        client_request_handle(sd, buffer);
-                        //send(sd , buffer , strlen(buffer) , 0 );
-                    }
-                }
-            }
-            #endif
-
             for (i = 0; i < max_clients; i++)
             {
                 sd = client_socket[i];
@@ -418,8 +384,6 @@ void tracker_run()
                     {
                         // Somebody disconnected, get his details and print  
                         getpeername(sd , (struct sockaddr*)&address, (socklen_t*)&addrlen);
-                        //printf("Host disconnected , ip %s , port %d \n" ,  
-                        // inet_ntoa(address.sin_addr) , ntohs(address.sin_port));   
                         stringstream ss;
                         ss << "Host disconnected!! ip: " << inet_ntoa(address.sin_addr) << " port: " << ntohs(address.sin_port);
                         fprint_log(ss.str());
@@ -432,12 +396,10 @@ void tracker_run()
                         char buffer[read_size + 1] = {'\0'};
                         data_read(sd, buffer, read_size);
 
-                        //cout << "SHA1 string read: " << buffer << endl;
                         stringstream ss;
                         ss << "Request read: " << buffer;
                         fprint_log(ss.str());
                         getpeername(sd , (struct sockaddr*)&address, (socklen_t*)&addrlen);
-                        //printf("Client , ip %s , port %d \n", inet_ntoa(address.sin_addr), ntohs(address.sin_port));   
 
                         client_request_handle(sd, buffer);
                     }

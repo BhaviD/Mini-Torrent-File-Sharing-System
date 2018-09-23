@@ -11,7 +11,6 @@
 #include <set>
 #include <sstream>
 
-// Client side C/C++ program to demonstrate Socket programming 
 #include <sys/socket.h> 
 #include <cstdlib> 
 #include <netinet/in.h> 
@@ -393,16 +392,6 @@ int share_request(vector<string> &cmd)
     return SUCCESS;
 }
 
-void do_join(thread &t)
-{
-    t.join();
-}
-
-void join_all(vector<thread>& v)
-{
-    for_each(v.begin(), v.end(), do_join);
-}
-
 void file_chunk_ids_get(string seeder_addr, string double_sha1_str, vector<vector<int>>& chunk_ids_vec, int download_id)
 {
     string seeder_ip;
@@ -494,8 +483,6 @@ void chunks_download(string double_sha1_str, string reqd_ids_str, string seeder_
             char downloaded_chunk[read_size + 1] = {'\0'};
             fprint_log("chunk id: " + to_string(id));
             data_read(sock, downloaded_chunk, read_size);
-
-            //fprint_log("Bytes read: " + to_string(id) + " " + to_string(read_size) + " thread id: " + ss.str());
 
             fout.seekp(id * PIECE_SIZE, ios::beg);
             fout.write(downloaded_chunk, read_size);
@@ -1093,7 +1080,6 @@ void seeder_run(bool& seeder_exit)
 
     if( (seeder_socket = socket(AF_INET , SOCK_STREAM , 0)) == 0)
     {
-        perror("socket failed");
         stringstream ss;
         ss << __func__ << " (" << __LINE__ << "): socket failed!!";
         fprint_log(ss.str());
@@ -1104,7 +1090,6 @@ void seeder_run(bool& seeder_exit)
     //this is just a good habit, it will work without this
     if( setsockopt(seeder_socket, SOL_SOCKET, SO_REUSEADDR, (char *)&opt, sizeof(opt)) < 0 )
     {
-        perror("setsockopt");
         stringstream ss;
         ss << __func__ << " (" << __LINE__ << "): setsockopt";
         fprint_log(ss.str());
@@ -1119,7 +1104,6 @@ void seeder_run(bool& seeder_exit)
     //bind the socket to localhost port 4500
     if (bind(seeder_socket, (struct sockaddr *)&address, sizeof(address))<0)   
     {   
-        perror("bind failed");   
         stringstream ss;
         ss << __func__ << " (" << __LINE__ << "): bind failed";
         fprint_log(ss.str());
@@ -1127,18 +1111,19 @@ void seeder_run(bool& seeder_exit)
     }   
     stringstream ss;
     ss << "Seeder " << ip[CLIENT] << ":" << port[CLIENT] << " listening";
-    //printf("Listener on port %d \n", port[CLIENT]);
+    fprint_log(ss.str());
          
     //try to specify maximum of 100 pending connections for the master socket  
     if (listen(seeder_socket, MAX_CONNS) < 0)   
-    {   
-        perror("listen");   
+    {
+        stringstream ss;
+        ss << __func__ << " (" << __LINE__ << "): listen failed";
+        fprint_log(ss.str());
         exit(EXIT_FAILURE);   
     }   
          
     //accept the incoming connection  
     addrlen = sizeof(address);
-    //printf ("Waiting for connections ...\n");
 
     while(!seeder_exit)
     {   
@@ -1172,7 +1157,9 @@ void seeder_run(bool& seeder_exit)
         {
             if(errno != EINTR)
             {
-                printf("select error");
+                stringstream ss;
+                ss << __func__ << " (" << __LINE__ << "): select error";
+                fprint_log(ss.str());
             }
             continue;
         }
@@ -1184,16 +1171,12 @@ void seeder_run(bool& seeder_exit)
             if ((new_socket = accept(seeder_socket,  
                     (struct sockaddr *)&address, (socklen_t*)&addrlen))<0)   
             {   
-                perror("accept");   
+                stringstream ss;
+                ss << __func__ << " (" << __LINE__ << "): accept() failed!!";
+                fprint_log(ss.str());
                 exit(EXIT_FAILURE);   
             }   
              
-            //inform user of socket number - used in send and receive commands  
-            //printf("New connection , socket fd is %d , ip is : %s , port : %d\n",
-                    //new_socket , inet_ntoa(address.sin_addr) , ntohs (address.sin_port));   
-
-            //printf ("Client connected!!\n");   
-
             //add new socket to array of sockets  
             for (i = 0; i < max_clients; i++)   
             {
@@ -1201,7 +1184,6 @@ void seeder_run(bool& seeder_exit)
                 if( client_socket[i] == 0 )
                 {
                     client_socket[i] = new_socket;
-                    //printf("Adding to list of sockets as %d\n" , i);
                     break;   
                 }
             }
@@ -1228,8 +1210,6 @@ void seeder_run(bool& seeder_exit)
                     {
                         // Somebody disconnected, get his details and print  
                         getpeername(sd , (struct sockaddr*)&address, (socklen_t*)&addrlen);
-                        //printf("Host disconnected , ip %s , port %d \n" ,  
-                             // inet_ntoa(address.sin_addr) , ntohs(address.sin_port));   
                         stringstream ss;
                         ss << "Host disconnected!! ip: " << inet_ntoa(address.sin_addr) << " port: " << ntohs(address.sin_port);
                         fprint_log(ss.str());
@@ -1242,13 +1222,11 @@ void seeder_run(bool& seeder_exit)
                         char buffer[read_size + 1] = {'\0'};
                         data_read(sd, buffer, read_size);
 
-                        //cout << "SHA1 string read: " << buffer << endl;
                         stringstream ss;
                         ss << "Request read: " << buffer;
                         fprint_log(ss.str());
 
                         getpeername(sd , (struct sockaddr*)&address, (socklen_t*)&addrlen);
-                        //printf("Client , ip %s , port %d \n", inet_ntoa(address.sin_addr), ntohs(address.sin_port));   
 
                         client_request_handle(sd, buffer);
                     }
