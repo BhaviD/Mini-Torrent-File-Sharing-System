@@ -7,6 +7,7 @@ using namespace std;
 #include <openssl/sha.h>
 #include <vector>
 #include <map>
+#include <set>
 
 #include <stdio.h>  
 #include <string.h>       //strlen  
@@ -41,7 +42,7 @@ static string my_tracker_ip, other_tracker_ip;
 static int my_tracker_port, other_tracker_port;
 string working_dir;
 
-map<string, string> seeder_map;
+map<string, set<string>> seeder_map;
 
 enum client_request
 {
@@ -93,12 +94,41 @@ void fprint_log(string msg)
 
 void fprint_seeder_info(string msg)
 {
+    ofstream out(seeder_file_path, ios_base::app);
+    if(!out)
+    {
+        string err_str = "Error: ";
+        err_str = err_str + strerror(errno);
+        status_print(FAILURE, err_str);
+        return;
+    }
+    out << msg << "\n";
+}
 
+void seederlist_reprint()
+{
+    ofstream out(seeder_file_path, ios_base::trunc);
+    if(!out)
+    {
+        string err_str = "Error: ";
+        err_str = err_str + strerror(errno);
+        status_print(FAILURE, err_str);
+        return;
+    }
+    for(auto mitr = seeder_map.begin(); mitr != seeder_map.end(); ++mitr)
+    {
+        string double_sha1_str = mitr->first;
+        set<string>& s = mitr->second;
+        for(auto sitr = s.begin(); sitr != s.end(); ++sitr)
+        {
+            out << double_sha1_str << " " << *sitr << "\n";
+        }
+    }
 }
 
 void client_request_handle(int sock, string req_str)
 {
-    int dollar_pos = req_str.find_first_of('$');
+    int dollar_pos = req_str.find('$');
     string cmd = req_str.substr(0, dollar_pos);
     cout << "Command: " << cmd << endl;
     req_str = req_str.substr(dollar_pos + 1);
@@ -108,60 +138,74 @@ void client_request_handle(int sock, string req_str)
     {
         case SHARE:
         {
-            dollar_pos = req_str.find_first_of('$');
+            dollar_pos = req_str.find('$');
             string double_sha1_str = req_str.substr(0, dollar_pos);
             req_str = req_str.substr(dollar_pos + 1);
 
             string data_str = req_str;
 
-            dollar_pos = req_str.find_first_of('$');
+            dollar_pos = req_str.find('$');
             string client_addr_str = req_str.substr(0, dollar_pos);
             req_str = req_str.substr(dollar_pos + 1);
 
             string file_name_str = req_str;
 
-            //fprint_log("Inserting " + sha1_str + " -> " + client_addr_str); 
             auto itr = seeder_map.find(double_sha1_str);
-            if (itr == seeder_map.end())
+            if(itr == seeder_map.end())
             {
-                seeder_map[double_sha1_str] = client_addr_str;
+                seeder_map[double_sha1_str] = set<string>();
+                itr = seeder_map.find(double_sha1_str);
             }
-            else
-            {
-                seeder_map[double_sha1_str] += "$" + client_addr_str;
-            }
-            //seeder_map.insert({sha1_str, client_addr_str});
+            set<string>& s = itr->second;
+            s.insert(client_addr_str);
 
             fprint_log(file_name_str + " shared by client " + client_addr_str); 
-            fprint_seeder_info(double_sha1_str + "$" + client_addr_str);
+            fprint_seeder_info(double_sha1_str + " " + client_addr_str);
             break;
         }
 
         case GET:
         {
-            
-            //auto lb = seeder_multimap.lower_bound(req_str);
-            //auto ub = seeder_multimap.upper_bound(req_str);
+            string double_sha1_str = req_str;
 
-            string seeder_addrs = seeder_map[req_str];
-            #if 0
-            for(auto itr = lb; itr != ub; ++itr)
+            auto itr = seeder_map.find(double_sha1_str);
+            set<string>& s = itr->second;
+            auto sitr = s.begin();
+            string seeder_addrs = *sitr;
+            ++sitr;
+            for(; sitr != s.end(); ++sitr)
             {
-                str += itr->second;
-                ++itr;
-                if(itr != ub) str += "$";
-                --itr;
+                seeder_addrs += "$" + *sitr;
             }
-            #endif
+
             int sz = seeder_addrs.length();
             send(sock, &sz, sizeof(sz), 0);
             send(sock, seeder_addrs.c_str(), seeder_addrs.length(), 0);
-            fprint_log("Seeder List: " + seeder_addrs); 
+            fprint_log("For sha1: " + double_sha1_str + ", seeder List: " + seeder_addrs); 
             break;
         }
 
         case REMOVE_TORRENT:
+        {
+            dollar_pos = req_str.find('$');
+            string double_sha1_str = req_str.substr(0, dollar_pos);
+            req_str.erase(0, dollar_pos);
+
+            string data_str = req_str;
+
+            dollar_pos = req_str.find('$');
+            string client_addr_str = req_str.substr(0, dollar_pos);
+            req_str.erase(0, dollar_pos);
+
+            string file_name_str = req_str;
+
+            auto itr = seeder_map.find(double_sha1_str);
+            set<string>& s = itr->second;
+            s.erase(client_addr_str);
+            fprint_log("Client: " + client_addr_str + " stopped seeding " + file_name_str); 
+            seederlist_reprint();
             break;
+        }
 
         default:
             break;
@@ -187,7 +231,8 @@ void data_read(int sock, char* read_buffer, int size_to_read)
     int bytes_read = 0;
     do
     {
-        bytes_read += read(sock, read_buffer, size_to_read);   // read in a loop
+        bytes_read += read(sock, read_buffer + bytes_read, size_to_read);   // read in a loop
+        fprint_log("Bytes read: " + to_string(bytes_read));
     }while(bytes_read < size_to_read);
 }
 

@@ -241,7 +241,7 @@ int send_request(int sock, int req, string str)
     return SUCCESS;
 }
 
-void update_seeding_file(operation opn, string sha1_str, string file_path)
+void update_seeding_file(operation opn, string sha1_str, string file_path = "", string mtorrent_file_path = "")
 {
     switch(opn)
     {
@@ -251,7 +251,7 @@ void update_seeding_file(operation opn, string sha1_str, string file_path)
             //seeding_file_paths.insert({sha1_str, file_path});
 
             ofstream out(seeding_file_path + SEEDING_FILES_LIST, ios_base::app);
-            out << sha1_str << "$" << file_path << "\n";
+            out << sha1_str << "$" << file_path << "$" << mtorrent_file_path << "\n";
             break;
         }
         case REMOVE:
@@ -322,14 +322,14 @@ int share_request(vector<string> &cmd)
     {
         out << addr[TRACKER1] << "\n";
         out << addr[TRACKER2] << "\n";
-        out << local_file_path << "\n";
+        out << local_file_name << "\n";
         out << total_bytes_read << "\n";
         out << sha1_str << "\n";
     }
 
     // applying SHA1 on already created SHA1 string.
     string double_sha1_str = get_sha1_str((const unsigned char*)sha1_str.c_str(), sha1_str.length());
-    update_seeding_file(ADD, double_sha1_str, local_file_path);
+    update_seeding_file(ADD, double_sha1_str, local_file_path, mtorrent_file_path);
 
     int sock = make_connection_with_tracker();
     if(FAILURE == sock)
@@ -457,14 +457,15 @@ void chunks_download(string double_sha1_str, string reqd_ids_str, string seeder_
                 return;
             }
             char downloaded_chunk[read_size + 1] = {'\0'};
+            fprint_log("chunk id: " + to_string(id));
             data_read(sock, downloaded_chunk, read_size);
 
-            fprint_log("Bytes read: " + to_string(id) + " " + to_string(read_size) + " thread id: " + ss.str());
+            //fprint_log("Bytes read: " + to_string(id) + " " + to_string(read_size) + " thread id: " + ss.str());
 
             fout.seekp(id * PIECE_SIZE, ios::beg);
             fout.write(downloaded_chunk, read_size);
+            s.insert(id);
         }
-        s.insert(id);
     }
     close(sock);
 }
@@ -534,8 +535,6 @@ void file_download(string double_sha1_str, string seeder_addrs, unsigned long lo
         }
     }
 
-    // block created to restrict the scope of "out" variable
-    // create an empty file of size "filesize"
     ofstream fout(dest_file_path, ios::binary);
     if(!fout)
     {
@@ -557,20 +556,23 @@ void file_download(string double_sha1_str, string seeder_addrs, unsigned long lo
 
     for(int j = 0; j < nseeders; ++j)
         seeder_thread_arr[j].join();
-    
+ 
     mtx_inuse[download_id] = false;
 }
 
 void data_read(int sock, char* read_buffer, int size_to_read)
 {
     int bytes_read = 0;
+    stringstream ss;
+    ss << this_thread::get_id();
     do
     {
-        bytes_read += read(sock, read_buffer, size_to_read);   // read in a loop
+        bytes_read += read(sock, read_buffer + bytes_read, size_to_read);   // read in a loop
+        fprint_log("Bytes read: " + to_string(bytes_read) + " thread id: " + ss.str());
     }while(bytes_read < size_to_read);
 }
 
-int get_request(vector<string> &cmd)
+void get_request(vector<string> &cmd)
 {
     string mtorrent_file_path = abs_path_get(cmd[1]);
     string dest_file_path = abs_path_get(cmd[2]);
@@ -581,7 +583,7 @@ int get_request(vector<string> &cmd)
         string err_str = "Error: ";
         err_str = err_str + strerror(errno);
         status_print(FAILURE, err_str);
-        return FAILURE;
+        return;
     }
 
     int line_no = 0;
@@ -613,7 +615,7 @@ int get_request(vector<string> &cmd)
         status_print(FAILURE, "Read failed!!");
         fprint_log("Read failed!! get_request() ");
         close(sock);
-        return FAILURE;
+        return;
     }
     char seeder_list[read_size + 1] = {'\0'};
     data_read(sock, seeder_list, read_size);
@@ -623,6 +625,43 @@ int get_request(vector<string> &cmd)
     mtx_inuse[download_id] = true;
     thread download_thread(file_download, double_sha1_str, (string)seeder_list, filesize, dest_file_path, download_id);
     download_thread.detach();
+}
+
+void remove_request(vector<string> &cmd)
+{
+    string mtorrent_file_path = abs_path_get(cmd[1]);
+
+    ifstream in(mtorrent_file_path);
+    if(!in)
+    {
+        string err_str = "Error: ";
+        err_str = err_str + strerror(errno);
+        status_print(FAILURE, err_str);
+        return;
+    }
+
+    int line_no = 0;
+    string line_str;
+
+    string file_name;
+    if(line_no == 3)    // filename
+    {
+        file_name = line_str;
+        getline(in, line_str);
+        ++line_no;
+    }
+
+    while(line_no != 5 && getline(in, line_str))
+        ++line_no;
+
+    string double_sha1_str;
+    if(line_no == 5)    // sha1 string
+    {
+        double_sha1_str = get_sha1_str((const unsigned char*)line_str.c_str(), line_str.length());
+    }
+
+    int sock = make_connection_with_tracker();
+    send_request(sock, REMOVE_TORRENT, double_sha1_str + "$" + addr[CLIENT] + "$" + file_name);
 }
 
 void enter_commands()
@@ -753,6 +792,12 @@ void enter_commands()
                 continue;
             get_request(command);
         }
+        else if(command[0] == "remove")
+        {
+            if(FAILURE == command_size_check(command, 2, 2, "remove: (usage):- \"remove <path_to_.mtorrent_file>\""))
+                continue;
+            remove_request(command);
+        }
         else
         {
             status_print(FAILURE, "Invalid Command. Please try again!!");
@@ -873,34 +918,38 @@ void seeder_run(bool& seeder_exit)
 {
     int opt = true;
     int seeder_socket , addrlen , new_socket , client_socket[MAX_CONNS],
-        max_clients = MAX_CONNS , activity, i , valread , sd;   
+        max_clients = MAX_CONNS , activity, i , valread , sd;
     int max_sd;
     struct sockaddr_in address;
 
     signal(SIGUSR1, sigusr1_handler);
 
-    char buffer[1025];  //data buffer of 1K  
-
     fd_set readfds;
 
-    for (i = 0; i < max_clients; i++)   
-    {   
-        client_socket[i] = 0;   
+    for (i = 0; i < max_clients; i++)
+    {
+        client_socket[i] = 0;
     }
 
-    if( (seeder_socket = socket(AF_INET , SOCK_STREAM , 0)) == 0)   
-    {   
-        perror("socket failed");   
-        exit(EXIT_FAILURE);   
-    }   
+    if( (seeder_socket = socket(AF_INET , SOCK_STREAM , 0)) == 0)
+    {
+        perror("socket failed");
+        stringstream ss;
+        ss << __func__ << " (" << __LINE__ << "): socket failed!!";
+        fprint_log(ss.str());
+        exit(EXIT_FAILURE);
+    }
 
-    //set master socket to allow multiple connections ,  
-    //this is just a good habit, it will work without this  
-    if( setsockopt(seeder_socket, SOL_SOCKET, SO_REUSEADDR, (char *)&opt, sizeof(opt)) < 0 )   
-    {   
-        perror("setsockopt");   
-        exit(EXIT_FAILURE);   
-    }   
+    //set master socket to allow multiple connections ,
+    //this is just a good habit, it will work without this
+    if( setsockopt(seeder_socket, SOL_SOCKET, SO_REUSEADDR, (char *)&opt, sizeof(opt)) < 0 )
+    {
+        perror("setsockopt");
+        stringstream ss;
+        ss << __func__ << " (" << __LINE__ << "): setsockopt";
+        fprint_log(ss.str());
+        exit(EXIT_FAILURE);
+    }
 
     //type of socket created  
     address.sin_family = AF_INET;   
@@ -911,9 +960,14 @@ void seeder_run(bool& seeder_exit)
     if (bind(seeder_socket, (struct sockaddr *)&address, sizeof(address))<0)   
     {   
         perror("bind failed");   
+        stringstream ss;
+        ss << __func__ << " (" << __LINE__ << "): bind failed";
+        fprint_log(ss.str());
         exit(EXIT_FAILURE);   
     }   
-    //printf("Listener on port %d \n", port[CLIENT]);   
+    stringstream ss;
+    ss << "Seeder " << ip[CLIENT] << ":" << port[CLIENT] << " listening";
+    //printf("Listener on port %d \n", port[CLIENT]);
          
     //try to specify maximum of 100 pending connections for the master socket  
     if (listen(seeder_socket, MAX_CONNS) < 0)   
