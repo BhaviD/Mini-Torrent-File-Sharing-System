@@ -105,7 +105,7 @@ void fprint_seeder_info(string msg)
     out << msg << "\n";
 }
 
-void seederlist_reprint()
+void seederlist_recreate()
 {
     ofstream out(seeder_file_path, ios_base::trunc);
     if(!out)
@@ -140,15 +140,14 @@ void client_request_handle(int sock, string req_str)
         {
             dollar_pos = req_str.find('$');
             string double_sha1_str = req_str.substr(0, dollar_pos);
-            req_str = req_str.substr(dollar_pos + 1);
+            req_str.erase(0, dollar_pos+1);
 
-            string data_str = req_str;
+            //dollar_pos = req_str.find('$');
+            //string client_addr_str = req_str.substr(0, dollar_pos);
+            string client_addr_str = req_str;
+            //req_str = req_str.substr(dollar_pos + 1);
 
-            dollar_pos = req_str.find('$');
-            string client_addr_str = req_str.substr(0, dollar_pos);
-            req_str = req_str.substr(dollar_pos + 1);
-
-            string file_name_str = req_str;
+            //string file_name_str = req_str;
 
             auto itr = seeder_map.find(double_sha1_str);
             if(itr == seeder_map.end())
@@ -159,7 +158,8 @@ void client_request_handle(int sock, string req_str)
             set<string>& s = itr->second;
             s.insert(client_addr_str);
 
-            fprint_log(file_name_str + " shared by client " + client_addr_str); 
+            //fprint_log(file_name_str + " shared by client " + client_addr_str); 
+            fprint_log(double_sha1_str + " shared by client " + client_addr_str); 
             fprint_seeder_info(double_sha1_str + " " + client_addr_str);
             break;
         }
@@ -189,21 +189,20 @@ void client_request_handle(int sock, string req_str)
         {
             dollar_pos = req_str.find('$');
             string double_sha1_str = req_str.substr(0, dollar_pos);
-            req_str.erase(0, dollar_pos);
+            req_str.erase(0, dollar_pos+1);
 
-            string data_str = req_str;
+            //dollar_pos = req_str.find('$');
+            //string client_addr_str = req_str.substr(0, dollar_pos);
+            string client_addr_str = req_str;
+            //req_str.erase(0, dollar_pos);
 
-            dollar_pos = req_str.find('$');
-            string client_addr_str = req_str.substr(0, dollar_pos);
-            req_str.erase(0, dollar_pos);
-
-            string file_name_str = req_str;
+            //string file_name_str = req_str;
 
             auto itr = seeder_map.find(double_sha1_str);
             set<string>& s = itr->second;
             s.erase(client_addr_str);
-            fprint_log("Client: " + client_addr_str + " stopped seeding " + file_name_str); 
-            seederlist_reprint();
+            fprint_log("Client: " + client_addr_str + " stopped seeding " + double_sha1_str); 
+            seederlist_recreate();
             break;
         }
 

@@ -34,7 +34,7 @@ using namespace std;
 #define RIGHT               13
 #define LEFT                14
 #define BACKSPACE           127
-#define SEEDING_FILES_LIST  ("seeding_files.txt")
+#define SEEDING_FILES_LIST  "seeding_files.txt"
 #define TRACKER1            0
 #define TRACKER2            1
 #define CLIENT              2
@@ -43,24 +43,26 @@ using namespace std;
 
 static int cursor_r_pos;
 static int cursor_c_pos;
-static int cursor_left_limit;
-static int cursor_right_limit;
+static int cursor_left_limit = 1;
+static int cursor_right_limit = 1;
 string working_dir;
 static struct termios prev_attr, new_attr;
 
-map<string, string> seeding_file_paths;
+map<string, string>   seeding_files_map;
 map<string, set<int>> seeding_file_chunks;
+map<string, string>   files_downloading;
+map<string, string>   files_downloaded;
 
 static bool is_status_on;
 
-static string log_file_path, seeding_file_path, client_exec_path;
+static string log_file_path, seeding_files_path, client_exec_path;
 static string addr[3];
 static string ip[3];
 static int port[3];
 static int curr_tracker_id;
 static mutex download_mtx[MAX_DOWNLOADS];
+static mutex g_mtx;
 static bool mtx_inuse[MAX_DOWNLOADS];
-
 
 enum operation
 {
@@ -143,14 +145,20 @@ string current_timestamp_get()
     return asctime(ti);
 }
 
+void error_print(string err_msg)
+{
+    stringstream ss;
+    ss << __func__ << " (" << __LINE__ << "): socket failed!!";
+}
+
 void fprint_log(string msg)
 {
     ofstream out(log_file_path, ios_base::app);
     if(!out)
     {
-        string err_str = "Error: ";
-        err_str = err_str + strerror(errno);
-        status_print(FAILURE, err_str);
+        stringstream ss;
+        ss << "Error: (" << __func__ << ") (" << __LINE__ << "): " << strerror(errno);
+        status_print(FAILURE, ss.str());
         return;
     }
     string curr_timestamp = current_timestamp_get();
@@ -222,9 +230,9 @@ int make_connection_with_tracker()
         sock = make_connection(ip[curr_tracker_id], port[curr_tracker_id]);
         if(FAILURE == sock)
         {
-            string err_str = "Error: ";
-            err_str = err_str + strerror(errno);
-            status_print(FAILURE, err_str);
+            stringstream ss;
+            ss << "Error: (" << __func__ << ") (" << __LINE__ << "): " << strerror(errno);
+            status_print(FAILURE, ss.str());
             return FAILURE;
         }
     }
@@ -241,22 +249,40 @@ int send_request(int sock, int req, string str)
     return SUCCESS;
 }
 
-void update_seeding_file(operation opn, string sha1_str, string file_path = "", string mtorrent_file_path = "")
+void seeding_files_recreate()
+{
+    ofstream out(seeding_files_path, ios_base::trunc);
+    if(!out)
+    {
+        stringstream ss;
+        ss << "Error: (" << __func__ << ") (" << __LINE__ << "): " << strerror(errno);
+        status_print(FAILURE, ss.str());
+        return;
+    }
+    for(auto itr = seeding_files_map.begin(); itr != seeding_files_map.end(); ++itr)
+    {
+        out << itr->first << "$" << itr->second << "\n";
+    }
+}
+
+void update_seeding_file(operation opn, string double_sha1_str, string file_path = "", string mtorrent_file_path = "")
 {
     switch(opn)
     {
         case ADD:
         {
-            seeding_file_paths[sha1_str] = file_path;
-            //seeding_file_paths.insert({sha1_str, file_path});
+            seeding_files_map[double_sha1_str] = file_path + "$" + mtorrent_file_path;
 
-            ofstream out(seeding_file_path + SEEDING_FILES_LIST, ios_base::app);
-            out << sha1_str << "$" << file_path << "$" << mtorrent_file_path << "\n";
+            ofstream out(seeding_files_path, ios_base::app);
+            out << double_sha1_str << "$" << file_path << "$" << mtorrent_file_path << "\n";
             break;
         }
         case REMOVE:
-            /* TODO: create a thread and remove the file from seeding_files.txt */
+        {
+            seeding_files_map.erase(double_sha1_str);
+            seeding_files_recreate();
             break;
+        }
         default:
             break;
     }
@@ -303,9 +329,9 @@ int share_request(vector<string> &cmd)
 
         if(infile.fail() && !infile.eof())
         {
-            string err_str = "Error: ";
-            err_str = err_str + strerror(errno);
-            status_print(FAILURE, err_str);
+            stringstream ss;
+            ss << "Error: (" << __func__ << ") (" << __LINE__ << "): " << strerror(errno);
+            status_print(FAILURE, ss.str());
             return FAILURE;
         }
 
@@ -335,7 +361,7 @@ int share_request(vector<string> &cmd)
     if(FAILURE == sock)
         return FAILURE;
 
-    send_request(sock, SHARE, double_sha1_str + "$" + addr[CLIENT] + "$" + local_file_name);
+    send_request(sock, SHARE, double_sha1_str + "$" + addr[CLIENT]);
     close(sock);
 
     int filesize = total_bytes_read; 
@@ -464,6 +490,18 @@ void chunks_download(string double_sha1_str, string reqd_ids_str, string seeder_
 
             fout.seekp(id * PIECE_SIZE, ios::beg);
             fout.write(downloaded_chunk, read_size);
+
+            if(s.empty())
+            {
+                int tracker_sock = make_connection_with_tracker();
+                if(FAILURE == tracker_sock)
+                {
+                    close(sock);
+                    return;
+                }
+                send_request(tracker_sock, SHARE, double_sha1_str + "$" + addr[CLIENT]);
+                close(tracker_sock);
+            }
             s.insert(id);
         }
     }
@@ -538,13 +576,18 @@ void file_download(string double_sha1_str, string seeder_addrs, unsigned long lo
     ofstream fout(dest_file_path, ios::binary);
     if(!fout)
     {
-        string err_str = "Error: ";
-        err_str = err_str + strerror(errno);
-        status_print(FAILURE, err_str);
+        stringstream ss;
+        ss << "Error: (" << __func__ << ") (" << __LINE__ << "): " << strerror(errno);
+        status_print(FAILURE, ss.str());
         return;
     }
     fout.seekp(filesize - 1);
     fout << '\0';
+
+    {
+        lock_guard<mutex> lg(g_mtx);
+        files_downloading[double_sha1_str] = dest_file_path;
+    }
 
     for(int i = 0; i < nseeders; ++i)
     {
@@ -556,7 +599,12 @@ void file_download(string double_sha1_str, string seeder_addrs, unsigned long lo
 
     for(int j = 0; j < nseeders; ++j)
         seeder_thread_arr[j].join();
- 
+
+    {
+        lock_guard<mutex> lg(g_mtx);
+        files_downloading.erase(double_sha1_str);
+        files_downloaded[double_sha1_str] = dest_file_path;
+    }
     mtx_inuse[download_id] = false;
 }
 
@@ -580,9 +628,9 @@ void get_request(vector<string> &cmd)
     ifstream in(mtorrent_file_path);
     if(!in)
     {
-        string err_str = "Error: ";
-        err_str = err_str + strerror(errno);
-        status_print(FAILURE, err_str);
+        stringstream ss;
+        ss << "Error: (" << __func__ << ") (" << __LINE__ << "): " << strerror(errno);
+        status_print(FAILURE, ss.str());
         return;
     }
 
@@ -634,9 +682,9 @@ void remove_request(vector<string> &cmd)
     ifstream in(mtorrent_file_path);
     if(!in)
     {
-        string err_str = "Error: ";
-        err_str = err_str + strerror(errno);
-        status_print(FAILURE, err_str);
+        stringstream ss;
+        ss << "Error: (" << __func__ << ") (" << __LINE__ << "): " << strerror(errno);
+        status_print(FAILURE, ss.str());
         return;
     }
 
@@ -660,8 +708,52 @@ void remove_request(vector<string> &cmd)
         double_sha1_str = get_sha1_str((const unsigned char*)line_str.c_str(), line_str.length());
     }
 
+    if(files_downloading.find(double_sha1_str) != files_downloading.end())
+    {
+        return;
+    }
+
+    update_seeding_file(REMOVE, double_sha1_str);
+
     int sock = make_connection_with_tracker();
-    send_request(sock, REMOVE_TORRENT, double_sha1_str + "$" + addr[CLIENT] + "$" + file_name);
+    send_request(sock, REMOVE_TORRENT, double_sha1_str + "$" + addr[CLIENT]);
+    if(FAILURE == unlinkat(0, mtorrent_file_path.c_str(), 0))
+    {
+        stringstream ss;
+        ss << "Error: (" << __func__ << ") (" << __LINE__ << "): " << strerror(errno);
+        status_print(FAILURE, ss.str());
+    }
+}
+
+void downloads_show()
+{
+    screen_clear();
+    print_mode();
+    if(files_downloaded.empty())
+    {
+        cout << "\nNo Downloads Available!!\n";
+    }
+    else
+    {
+        cout << "\nFiles Downloaded:\n";
+        for(auto itr = files_downloaded.begin(); itr != files_downloaded.end(); ++itr)
+        {
+            cout << "[S] " << itr->second << endl;
+        }
+    }
+
+    if(files_downloading.empty())
+    {
+        cout << "\nNo Ongoing Downloads!!\n";
+    }
+    else
+    {
+        cout << "\nFiles Downloading:\n";
+        for(auto itr = files_downloading.begin(); itr != files_downloading.end(); ++itr)
+        {
+            cout << "[D] " << itr->second << endl;
+        }
+    }
 }
 
 void enter_commands()
@@ -798,6 +890,10 @@ void enter_commands()
                 continue;
             remove_request(command);
         }
+        else if(command[0] == "show" && command[1] == "downloads")
+        {
+            downloads_show();
+        }
         else
         {
             status_print(FAILURE, "Invalid Command. Please try again!!");
@@ -822,7 +918,9 @@ void file_chunks_upload(int sock, string req_str)
     string double_sha1_str = req_str.substr(0, dollar_pos);
     req_str.erase(0, dollar_pos+1);
 
-    string local_file_path = seeding_file_paths[double_sha1_str];
+    string file_entry = seeding_files_map[double_sha1_str];
+    dollar_pos = file_entry.find('$');
+    string local_file_path = file_entry.substr(0, dollar_pos);
 
     ifstream in (local_file_path.c_str(), ios::binary | ios::in);
     if(!in)
@@ -832,6 +930,8 @@ void file_chunks_upload(int sock, string req_str)
         status_print(FAILURE, err_str);
         return;
     }
+
+    fprint_log("File: " + local_file_path + "\nChunks requested to upload:\n" + req_str); 
 
     bool done = false;
     int id;
@@ -854,9 +954,9 @@ void file_chunks_upload(int sock, string req_str)
 
         if(in.fail() && !in.eof())
         {
-            string err_str = "Error: ";
-            err_str = err_str + strerror(errno);
-            status_print(FAILURE, err_str);
+            stringstream ss;
+            ss << "Error: (" << __func__ << ") (" << __LINE__ << "): " << strerror(errno);
+            status_print(FAILURE, ss.str());
             return;
         }
         int sz = in.gcount();
@@ -869,7 +969,6 @@ void client_request_handle(int sock, string req_str)
 {
     int dollar_pos = req_str.find('$');
     string cmd = req_str.substr(0, dollar_pos);
-    cout << "Command: " << cmd << endl;
     req_str = req_str.erase(0, dollar_pos+1);
     int req = stoi(cmd);
 
@@ -899,8 +998,6 @@ void client_request_handle(int sock, string req_str)
         {
             thread th(file_chunks_upload, sock, req_str);
             th.detach();
-
-            fprint_log("Seeder List: " + req_str); 
             break;
         }
 
@@ -1029,10 +1126,10 @@ void seeder_run(bool& seeder_exit)
             }   
              
             //inform user of socket number - used in send and receive commands  
-            printf("New connection , socket fd is %d , ip is : %s , port : %d\n",
-                    new_socket , inet_ntoa(address.sin_addr) , ntohs (address.sin_port));   
+            //printf("New connection , socket fd is %d , ip is : %s , port : %d\n",
+                    //new_socket , inet_ntoa(address.sin_addr) , ntohs (address.sin_port));   
 
-            printf ("Client connected!!\n");   
+            //printf ("Client connected!!\n");   
 
             //add new socket to array of sockets  
             for (i = 0; i < max_clients; i++)   
@@ -1041,45 +1138,13 @@ void seeder_run(bool& seeder_exit)
                 if( client_socket[i] == 0 )
                 {
                     client_socket[i] = new_socket;
-                    printf("Adding to list of sockets as %d\n" , i);
+                    //printf("Adding to list of sockets as %d\n" , i);
                     break;   
                 }
             }
         }
         else
         {
-            #if 0
-            //else its some IO operation on some other socket 
-            for (i = 0; i < max_clients; i++)
-            {
-                sd = client_socket[i];
-
-                if (FD_ISSET( sd , &readfds))
-                {
-                    //Check if it was for closing , and also read the incoming message  
-                    if ((valread = read(sd, buffer, 1024)) == 0)
-                    {
-                        //Somebody disconnected , get his details and print  
-                        getpeername(sd , (struct sockaddr*)&address, (socklen_t*)&addrlen);
-                        printf("Host disconnected , ip %s , port %d \n" ,
-                                inet_ntoa(address.sin_addr) , ntohs(address.sin_port));
-
-                        close( sd );
-                        client_socket[i] = 0;
-                    }
-                    else
-                    {
-                        buffer[valread] = '\0';
-                        cout << "SHA1 string read: " << buffer << endl;
-                        getpeername(sd , (struct sockaddr*)&address, (socklen_t*)&addrlen);
-                        printf("Client , ip %s , port %d \n", inet_ntoa(address.sin_addr), ntohs(address.sin_port));
-
-                        client_request_handle(sd, buffer);
-                    }
-                }
-            }
-            #endif
-
             //else its some IO operation on some other socket 
             for (i = 0; i < max_clients; i++)   
             {   
@@ -1156,7 +1221,8 @@ int main(int argc, char* argv[])
 
     client_exec_path = abs_path_get(argv[0]);
     int pos = client_exec_path.find_last_of("/");
-    seeding_file_path = client_exec_path.substr(0, pos+1);
+    seeding_files_path = client_exec_path.substr(0, pos+1);
+    seeding_files_path += SEEDING_FILES_LIST;
 
     addr[CLIENT] = argv[1];
     addr[TRACKER1] = argv[2];
