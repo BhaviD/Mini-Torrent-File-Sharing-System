@@ -122,7 +122,7 @@ void seederlist_recreate()
         set<string>& s = mitr->second;
         for(auto sitr = s.begin(); sitr != s.end(); ++sitr)
         {
-            out << double_sha1_str << " " << *sitr << "\n";
+            out << double_sha1_str << "$" << *sitr << "\n";
         }
     }
 }
@@ -154,7 +154,7 @@ void client_request_handle(int sock, string req_str)
             s.insert(client_addr_str);
 
             fprint_log(double_sha1_str + " shared by client " + client_addr_str); 
-            fprint_seeder_info(double_sha1_str + " " + client_addr_str);
+            fprint_seeder_info(double_sha1_str + "$" + client_addr_str);
             break;
         }
 
@@ -236,6 +236,34 @@ void data_read(int sock, char* read_buffer, int size_to_read)
     }while(bytes_read < size_to_read);
 }
 
+void seeder_list_fetch()
+{
+    int pos = seeder_file_path.find_last_of('/');
+    string temp_file_path = seeder_file_path.substr(0, pos+1) + "temp_file.txt";
+    rename(seeder_file_path.c_str(), temp_file_path.c_str());
+
+    ifstream in(temp_file_path);
+    if(!in)
+    {
+        return;
+    }
+
+    string line_str;
+
+    int dollar_pos;
+    while(in)
+    {
+        in >> line_str;
+        client_request_handle(0, to_string(SHARE) + "$" + line_str);
+    }
+    if(FAILURE == unlinkat(0, temp_file_path.c_str(), 0))
+    {
+        stringstream ss;
+        ss << "Error: (" << __func__ << ") (" << __LINE__ << "): " << strerror(errno);
+        status_print(FAILURE, ss.str());
+    }
+}
+
 void tracker_run()
 {
     int opt = TRUE;   
@@ -243,6 +271,8 @@ void tracker_run()
         max_clients = MAX_CONNS , activity, i , valread , sd;   
     int max_sd;
     struct sockaddr_in address;   
+
+    seeder_list_fetch();
 
     fd_set readfds;
 
@@ -282,7 +312,9 @@ void tracker_run()
         fprint_log(ss.str());
         exit(EXIT_FAILURE);   
     }   
-    printf("Listening on port %d \n", my_tracker_port);   
+    stringstream ss;
+    ss << "Listening on port " << my_tracker_port;
+    fprint_log(ss.str());
          
     //try to specify maximum of 100 pending connections for the master socket  
     if (listen(tracker_socket, MAX_CONNS) < 0)   
@@ -295,7 +327,6 @@ void tracker_run()
          
     //accept the incoming connection  
     addrlen = sizeof(address);
-    printf ("Waiting for connections ...\n");
 
     while(TRUE)
     {   
