@@ -250,7 +250,6 @@ void seeder_list_fetch()
 
     string line_str;
 
-    int dollar_pos;
     while(in)
     {
         in >> line_str;
@@ -377,11 +376,8 @@ void tracker_run()
             //inform user of socket number - used in send and receive commands
             stringstream ss;
             ss << __func__ << " (" << __LINE__ << "): New connection, socket fd is " << new_socket
-               << inet_ntoa(address.sin_addr), ntohs(address.sin_port);
+               << inet_ntoa(address.sin_addr) << ":" << ntohs(address.sin_port);
             fprint_log(ss.str());
-
-            //printf("New connection , socket fd is %d , ip is : %s , port : %d\n",
-                   // new_socket , inet_ntoa(address.sin_addr) , ntohs (address.sin_port));   
 
             //add new socket to array of sockets  
             for (i = 0; i < max_clients; i++)   
@@ -442,7 +438,7 @@ void tracker_run()
 
 void ip_and_port_split(string addr, string &ip, int &port)
 {
-    int colon_pos = addr.find(':');
+    unsigned int colon_pos = addr.find(':');
     if(colon_pos != string::npos)
     {
         ip = addr.substr(0, colon_pos);

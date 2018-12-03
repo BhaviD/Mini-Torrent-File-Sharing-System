@@ -317,7 +317,6 @@ int share_request(vector<string> &cmd)
     mtorrent_file_path = abs_path_get(cmd[2]);
 
     int bytes_read, total_bytes_read = 0, nchunks = 0;
-    bool read_done = false;
     string sha1_str;
 
     ifstream infile (local_file_path.c_str(), ios::binary | ios::in);
@@ -416,7 +415,7 @@ void file_chunk_ids_get(string seeder_addr, string double_sha1_str, vector<vecto
     string chunk_ids(file_chunk_ids);
     fprint_log(seeder_addr + " has these chunks: " + chunk_ids);
 
-    int dollar_pos, id;
+    unsigned int dollar_pos, id;
     vector<int> ids_vec;
     while((dollar_pos = chunk_ids.find('$')) != string::npos)
     {
@@ -435,7 +434,8 @@ void chunks_download(string double_sha1_str, string reqd_ids_str, string seeder_
                      int download_id, ofstream& fout, string mtorrent_file_path)
 {
     string seeder_ip;
-    int seeder_port, dollar_pos, id;
+    int seeder_port, id;
+    unsigned int dollar_pos;
     ip_and_port_split(seeder_addr, seeder_ip, seeder_port);
 
     int sock = make_connection(seeder_ip, seeder_port);
@@ -507,7 +507,7 @@ void chunks_download(string double_sha1_str, string reqd_ids_str, string seeder_
 
 void file_download(string double_sha1_str, string seeder_addrs, unsigned long long filesize, string dest_file_path, int download_id, string mtorrent_file_path)
 {
-    int dollar_pos, ndollars;
+    unsigned int dollar_pos, ndollars;
     string addr;
     vector<vector<int>> seeder_chunk_ids;
     vector<string>      seeder_addr_vec;
@@ -525,7 +525,6 @@ void file_download(string double_sha1_str, string seeder_addrs, unsigned long lo
     thread* seeder_thread_arr = new thread[nseeders];
 
     string ip;
-    int port;
     int i = 0;
     while((dollar_pos = seeder_addrs.find('$')) != string::npos)
     {
@@ -637,7 +636,6 @@ void get_request(vector<string> &cmd)
     while(line_no != 4 && getline(in, line_str))
         ++line_no;
 
-    int nchunks = 0;
     unsigned long long filesize = 0;
     if(line_no == 4)    // filesize
     {
@@ -910,7 +908,7 @@ void enter_commands()
 
 void ip_and_port_split(string addr, string &ip, int &port)
 {
-    int colon_pos = addr.find(':');
+    unsigned int colon_pos = addr.find(':');
     if(colon_pos != string::npos)
     {
         ip = addr.substr(0, colon_pos);
@@ -920,7 +918,7 @@ void ip_and_port_split(string addr, string &ip, int &port)
 
 void file_chunks_upload(int sock, string req_str)
 {
-    int dollar_pos = req_str.find('$');
+    unsigned int dollar_pos = req_str.find('$');
     string double_sha1_str = req_str.substr(0, dollar_pos);
     req_str.erase(0, dollar_pos+1);
 
